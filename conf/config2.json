@@ -1,0 +1,19 @@
+{
+    "me": {
+        "id": 2,
+        "name": "node-2",
+        "cidr": "10.123.234.0/24",
+        "seq_num": 10,
+        "private_key": "node2-pri",
+        "public_key": "node2-pub",
+        "endpoint": "node2.mesh-test.xyz:51820"
+    },
+    "peers": [
+        {
+            "node_id": 1,
+            "pubkey": "node1-pub",
+            "endpoint": "44.22.11.1:51820",
+            "seq_num": 1
+        }
+    ]
+}

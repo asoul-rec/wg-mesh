@@ -1,0 +1,25 @@
+{
+    "me": {
+        "id": 5,
+        "name": "node-5",
+        "cidr": "10.123.234.0/24",
+        "seq_num": 1,
+        "private_key": "node5-pri",
+        "public_key": "node5-pub",
+        "endpoint": "bridge-node-global.net:51820"
+    },
+    "peers": [
+        {
+            "node_id": 2,
+            "pubkey": "wrong-node2-pub",
+            "endpoint": "node2.mesh-test.xyz:51820",
+            "seq_num": 2000
+        },
+        {
+            "node_id": 3,
+            "pubkey": "node3-pub",
+            "endpoint": "93.184.216.34:51820",
+            "seq_num": 4294967290
+        }
+    ]
+}

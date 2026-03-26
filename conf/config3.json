@@ -1,0 +1,19 @@
+{
+    "me": {
+        "id": 3,
+        "name": "node-3",
+        "cidr": "10.123.234.0/24",
+        "seq_num": 4294967290,
+        "private_key": "node3-pri",
+        "public_key": "node3-pub",
+        "endpoint": "93.184.216.34:51820"
+    },
+    "peers": [
+        {
+            "node_id": 4,
+            "pubkey": "node4-pub",
+            "endpoint": "node-london-4.internal.io:51820",
+            "seq_num": 5
+        }
+    ]
+}

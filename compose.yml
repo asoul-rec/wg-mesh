@@ -1,0 +1,58 @@
+services:
+  node1:
+    image: python:3.14-alpine
+    volumes:
+      - ./mesh.py:/app/mesh.py
+      - ./runtime_conf/config1.json:/app/config.json
+    command: python /app/mesh.py --config /app/config.json --dry-run
+    networks:
+      wg_mesh_net:
+        ipv4_address: 10.123.234.1
+
+  node2:
+    image: python:3.14-alpine
+    volumes:
+      - ./mesh.py:/app/mesh.py
+      - ./runtime_conf/config2.json:/app/config.json
+    command: python /app/mesh.py --config /app/config.json --dry-run
+    networks:
+      wg_mesh_net:
+        ipv4_address: 10.123.234.2
+
+  node3:
+    image: python:3.14-alpine
+    volumes:
+      - ./mesh.py:/app/mesh.py
+      - ./runtime_conf/config3.json:/app/config.json
+    command: python /app/mesh.py --config /app/config.json --dry-run
+    networks:
+      wg_mesh_net:
+        ipv4_address: 10.123.234.3
+
+  node4:
+    image: python:3.14-alpine
+    volumes:
+      - ./mesh.py:/app/mesh.py
+      - ./runtime_conf/config4.json:/app/config.json
+    command: python /app/mesh.py --config /app/config.json --dry-run
+    networks:
+      wg_mesh_net:
+        ipv4_address: 10.123.234.4
+
+  node5:
+    image: python:3.14-alpine
+    volumes:
+      - ./mesh.py:/app/mesh.py
+      - ./runtime_conf/config5.json:/app/config.json
+    command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && python /app/mesh.py --config /app/config.json --dry-run'
+    networks:
+      wg_mesh_net:
+        ipv4_address: 10.123.234.5
+
+networks:
+  wg_mesh_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.123.234.0/24
+          gateway: 10.123.234.234
