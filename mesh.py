@@ -4,6 +4,7 @@ import time
 import json
 import logging
 import argparse
+import signal
 import ipaddress
 import subprocess
 import compression.zstd as zstd
@@ -316,6 +317,17 @@ async def main():
     controller = MeshController(config_file=args.config, dry_run=args.dry_run)
     loop = asyncio.get_running_loop()
 
+    stop_event = asyncio.Event()
+    def handle_stop():
+        logging.warning("Received shutdown signal, initiating graceful exit...")
+        stop_event.set()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, handle_stop)
+        loop.add_signal_handler(signal.SIGINT, handle_stop)
+    except NotImplementedError:
+        pass
+
     my_ip = get_internal_ip(controller.cidr_str, controller.me.node_id)
     logging.info(f"Binding UDP endpoint on {my_ip}:8080")
 
@@ -331,13 +343,11 @@ async def main():
         controller.bump_my_seq(jump=controller.STALE_TOLERANCE * 2)
         controller.save_conf()
         controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
-        await asyncio.Event().wait()
+        await stop_event.wait()
     finally:
         transport.close()
+        logging.info("Graceful shutdown complete.")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.warning(f"Received sigint, exiting...")
+    asyncio.run(main())
