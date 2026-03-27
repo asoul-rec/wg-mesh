@@ -10,8 +10,15 @@
     },
     "peers": [
         {
+            "node_id": 1,
+            "pubkey": "old_pub_key_for_node1",
+            "endpoint": "random-old-address:51820",
+            "seq_num": 1234321,
+            "timestamp": 1770000000
+        },
+        {
             "node_id": 2,
-            "pubkey": "wrong-node2-pub",
+            "pubkey": "node2-pub",
             "endpoint": "node2.mesh-test.xyz:51820",
             "seq_num": 2000
         },

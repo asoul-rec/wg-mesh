@@ -14,6 +14,12 @@
             "pubkey": "node4-pub",
             "endpoint": "node-london-4.internal.io:51820",
             "seq_num": 5
+        },
+        {
+            "node_id": 5,
+            "pubkey": "node5-pub",
+            "endpoint": "bridge-node-global.net:51820",
+            "seq_num": 1
         }
     ]
 }

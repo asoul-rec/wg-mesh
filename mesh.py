@@ -43,12 +43,13 @@ def generate_wg_keys():
 
 
 class Node:
-    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0):
+    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0, timestamp=0):
         self.node_id = int(node_id)
         self.name = name
         self.pubkey = pubkey
         self.endpoint = endpoint
         self.seq_num = seq_num
+        self.timestamp = timestamp
         self.last_seen = time.time()
 
     def to_dict(self):
@@ -57,7 +58,8 @@ class Node:
             "name": self.name,
             "pubkey": self.pubkey,
             "endpoint": self.endpoint,
-            "seq_num": self.seq_num
+            "seq_num": self.seq_num,
+            "timestamp": int(self.timestamp)
         }
 
 
@@ -110,7 +112,8 @@ class MeshController:
 
         self.me = Node(
             my_id, me_cfg.get("name", f"node-{my_id}"), my_pubkey,
-            me_cfg.get("endpoint", ""), me_cfg.get("seq_num", 0)
+            me_cfg.get("endpoint", ""), me_cfg.get("seq_num", 0),
+            me_cfg.get("timestamp", int(time.time()))
         )
 
         peers_cfg = data.get("peers", [])
@@ -123,7 +126,8 @@ class MeshController:
                 continue
             self.known_nodes[peer_id] = Node(
                 peer_id, info.get("name", f"node-{peer_id}"), peer_key,
-                info.get("endpoint", ""), info.get("seq_num", 0)
+                info.get("endpoint", ""), info.get("seq_num", 0),
+                info.get("timestamp", 0)
             )
 
         self.known_nodes[self.me.node_id] = self.me  # must be the same pointer
@@ -140,6 +144,7 @@ class MeshController:
                     "name": self.me.name,
                     "cidr": self.cidr_str,
                     "seq_num": self.me.seq_num,
+                    "timestamp": int(self.me.timestamp),
                     "private_key": self.private_key,
                     "public_key": self.me.pubkey,
                     "endpoint": self.me.endpoint
@@ -159,6 +164,7 @@ class MeshController:
 
     def bump_my_seq(self, jump=1):
         self.me.seq_num = (self.me.seq_num + jump) % (1 << 32)
+        self.me.timestamp = int(time.time())
 
     def handle_packet(self, data, sender_ip):
         if len(data) < 13:
@@ -218,13 +224,24 @@ class MeshController:
             recv_seq = recv_n.get('seq_num', 0)
 
             if nid not in self.known_nodes:
-                new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq)
+                new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq, timestamp=recv_n.get('timestamp', 0))
                 self.known_nodes[nid] = new_node
                 changed_local = True
                 continue
 
             local_n = self.known_nodes[nid]
             d = diff(nid, recv_seq)
+            recv_ts = recv_n.get('timestamp', 0)
+
+            # UTC Timestamp Veto logic
+            time_diff = recv_ts - local_n.timestamp
+            if d > 0 and time_diff <= -120:
+                d = -1
+                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (timestamp {time_diff}s older)")
+            elif d <= 0 and time_diff >= 120:
+                d = 1
+                logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (timestamp {time_diff}s newer)")
+
             local_content = [local_n.name, local_n.pubkey, local_n.endpoint]
             conflict = (recv_content != local_content)
 
@@ -238,11 +255,14 @@ class MeshController:
                         continue
                 else:
                     local_n.name, local_n.pubkey, local_n.endpoint = recv_content
+                    local_n.timestamp = recv_ts
 
             if d <= -self.STALE_TOLERANCE:
                 source_needs_correction = True
             if d > 0:
                 local_n.seq_num = recv_seq
+                if not conflict:
+                    local_n.timestamp = max(local_n.timestamp, recv_ts)
                 changed_local = True
 
         # Merging complete, send ACK to free the sender's pending task.
