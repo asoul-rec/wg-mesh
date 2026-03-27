@@ -7,9 +7,58 @@ import argparse
 import signal
 import ipaddress
 import subprocess
+import os
+import hashlib
+import hmac
 import compression.zstd as zstd
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def encrypt_payload(pubkey: str, payload: bytes) -> bytes:
+    nonce = os.urandom(8)
+    key = hashlib.sha256(pubkey.encode('utf-8')).digest()
+
+    out = bytearray(len(payload))
+    counter = 0
+    stream = b""
+    while len(stream) < len(payload):
+        counter_bytes = counter.to_bytes(4, 'big')
+        stream += hashlib.sha256(key + nonce + counter_bytes).digest()
+        counter += 1
+
+    for i in range(len(payload)):
+        out[i] = payload[i] ^ stream[i]
+
+    encrypted = nonce + bytes(out)
+    mac = hmac.new(key, encrypted, hashlib.sha256).digest()
+    return mac + encrypted
+
+
+def decrypt_payload(pubkey: str, data: bytes) -> bytes:
+    if len(data) < 40:
+        raise ValueError("Payload too short for encryption envelope")
+    mac, encrypted = data[:32], data[32:]
+    key = hashlib.sha256(pubkey.encode('utf-8')).digest()
+
+    expected_mac = hmac.new(key, encrypted, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise ValueError("MAC verification failed")
+
+    nonce, ciphertext = encrypted[:8], encrypted[8:]
+
+    out = bytearray(len(ciphertext))
+    counter = 0
+    stream = b""
+    while len(stream) < len(ciphertext):
+        counter_bytes = counter.to_bytes(4, 'big')
+        stream += hashlib.sha256(key + nonce + counter_bytes).digest()
+        counter += 1
+
+    for i in range(len(ciphertext)):
+        out[i] = ciphertext[i] ^ stream[i]
+
+    return bytes(out)
 
 
 def version_to_int(v_str):
@@ -21,14 +70,20 @@ def int_to_version(v_int):
     return f"{(v_int >> 24) & 255}.{(v_int >> 16) & 255}.{(v_int >> 8) & 255}.{v_int & 255}"
 
 
-VERSION_STR = "0.0.1.0"
+VERSION_STR = "0.0.1.1"
 VERSION = version_to_int(VERSION_STR)
-MINIMAL_COMPATIBLE_VERSION = version_to_int("0.0.1.0")
+MINIMAL_COMPATIBLE_VERSION = version_to_int("0.0.1.1")
 
 
 def get_internal_ip(cidr_str, node_id):
     network = ipaddress.IPv4Network(cidr_str, strict=True)
     return str(network[node_id])
+
+
+def get_node_id_from_ip(cidr_str, ip_str):
+    network = ipaddress.IPv4Network(cidr_str, strict=True)
+    ip = ipaddress.IPv4Address(ip_str)
+    return int(ip) - int(network.network_address)
 
 
 def generate_wg_keys():
@@ -167,18 +222,31 @@ class MeshController:
         self.me.timestamp = int(time.time())
 
     def handle_packet(self, data, sender_ip):
-        if len(data) < 13:
-            logging.warning(f"Bad packet from {sender_ip}, content {data}")
+        if len(data) < 4:
+            logging.warning(f"Bad packet from {sender_ip}, too short")
             return
 
-        pkt_version, pkt_type, origin_id, seq_num = struct.unpack('!IBII', data[:13])
+        pkt_version, = struct.unpack('!I', data[:4])
         if pkt_version > VERSION:
             logging.error(f"Cannot process package: minimal version {int_to_version(pkt_version)}, "
                           f"current version {VERSION_STR}")
             return
 
+        try:
+            decrypted = decrypt_payload(self.me.pubkey, data[4:])
+        except Exception as e:
+            logging.error(f"Failed to decrypt packet from {sender_ip}: {e!r}")
+            return
+
+        if len(decrypted) < 9:
+            logging.warning(f"Malformed decrypted packet from {sender_ip}")
+            return
+
+        pkt_type, origin_id, seq_num = struct.unpack('!BII', decrypted[:9])
+        payload_data = decrypted[9:]
+
         if pkt_type == 1:
-            self.process_announce(origin_id, seq_num, data[13:], sender_ip)
+            self.process_announce(origin_id, seq_num, payload_data, sender_ip)
         elif pkt_type == 2:
             self.process_ack(origin_id, seq_num, sender_ip)
 
@@ -285,34 +353,42 @@ class MeshController:
         if task_key in self.pending_acks:
             self.pending_acks[task_key].set()
 
-    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, payload=b""):
+    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, target_pubkey, payload=b""):
         if not self.transport:
             return
-        header = struct.pack('!IBII', MINIMAL_COMPATIBLE_VERSION, pkt_type, origin_id, seq_num)
-        self.transport.sendto(header + payload, (target_ip, 8080))
+        raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
+        encrypted_data = encrypt_payload(target_pubkey, raw_data)
+        packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
+        self.transport.sendto(packet, (target_ip, 8080))
 
     def send_ack(self, target_ip, origin_id, seq_num):
-        self.send_packet(target_ip, 2, origin_id, seq_num)
+        sender_id = get_node_id_from_ip(self.cidr_str, target_ip)
+        if sender_id not in self.known_nodes:
+            logging.error(f"Cannot send ACK, missing pubkey for immediate sender IP {target_ip} (node {sender_id})")
+            return
+        target_pubkey = self.known_nodes[sender_id].pubkey
+        self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey)
 
     def broadcast_packet(self, origin_id, seq_num, exclude_ip=None):
         payload_data = [node.to_dict() for node in self.known_nodes.values()]
-        payload_bytes = zstd.compress(json.dumps(payload_data).encode('utf-8'))
+        compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
 
         for nid, neighbor in self.known_nodes.items():
-            if nid == self.me.node_id: continue
-
+            if nid == self.me.node_id:
+                continue
             target_ip = get_internal_ip(self.cidr_str, neighbor.node_id)
-            if target_ip == exclude_ip: continue
+            if target_ip == exclude_ip:
+                continue
+            asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
 
-            asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, payload_bytes))
-
-    async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload):
+    async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
         task_key = (target_ip, origin_id, seq_num)
         ack_event = asyncio.Event()
         self.pending_acks[task_key] = ack_event
 
-        header = struct.pack('!IBII', VERSION, pkt_type, origin_id, seq_num)
-        packet = header + payload
+        raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
+        encrypted_data = encrypt_payload(target_pubkey, raw_data)
+        packet = struct.pack('!I', VERSION) + encrypted_data
 
         for attempt in range(3):
             if self.transport:
