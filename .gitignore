@@ -1,0 +1,14 @@
+*
+# sources
+!/.gitignore
+!/pyproject.toml
+!/README.md
+!/uv.lock
+!/src
+!/src/mesh
+!/src/mesh/*.py
+
+# test environment
+!/compose.yml
+!/conf
+!/conf/*

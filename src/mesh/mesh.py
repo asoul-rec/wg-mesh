@@ -1,100 +1,23 @@
+import argparse
 import asyncio
-import struct
-import time
+import compression.zstd as zstd
 import json
 import logging
-import argparse
 import signal
-import ipaddress
-import subprocess
-import os
-import hashlib
-import hmac
-import compression.zstd as zstd
+import struct
+import time
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def encrypt_payload(pubkey: str, payload: bytes) -> bytes:
-    nonce = os.urandom(8)
-    key = hashlib.sha256(pubkey.encode('utf-8')).digest()
-
-    out = bytearray(len(payload))
-    counter = 0
-    stream = b""
-    while len(stream) < len(payload):
-        counter_bytes = counter.to_bytes(4, 'big')
-        stream += hashlib.sha256(key + nonce + counter_bytes).digest()
-        counter += 1
-
-    for i in range(len(payload)):
-        out[i] = payload[i] ^ stream[i]
-
-    encrypted = nonce + bytes(out)
-    mac = hmac.new(key, encrypted, hashlib.sha256).digest()
-    return mac + encrypted
-
-
-def decrypt_payload(pubkey: str, data: bytes) -> bytes:
-    if len(data) < 40:
-        raise ValueError("Payload too short for encryption envelope")
-    mac, encrypted = data[:32], data[32:]
-    key = hashlib.sha256(pubkey.encode('utf-8')).digest()
-
-    expected_mac = hmac.new(key, encrypted, hashlib.sha256).digest()
-    if not hmac.compare_digest(mac, expected_mac):
-        raise ValueError("MAC verification failed")
-
-    nonce, ciphertext = encrypted[:8], encrypted[8:]
-
-    out = bytearray(len(ciphertext))
-    counter = 0
-    stream = b""
-    while len(stream) < len(ciphertext):
-        counter_bytes = counter.to_bytes(4, 'big')
-        stream += hashlib.sha256(key + nonce + counter_bytes).digest()
-        counter += 1
-
-    for i in range(len(ciphertext)):
-        out[i] = ciphertext[i] ^ stream[i]
-
-    return bytes(out)
-
-
-def version_to_int(v_str):
-    parts = [int(x) for x in v_str.split('.')]
-    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
-
-
-def int_to_version(v_int):
-    return f"{(v_int >> 24) & 255}.{(v_int >> 16) & 255}.{(v_int >> 8) & 255}.{v_int & 255}"
+from .utils import version_to_int, int_to_version, get_internal_ip, get_node_id_from_ip
+from .wg import generate_wg_keys
+from .crypto import encrypt_payload, decrypt_payload
 
 
 VERSION_STR = "0.0.1.1"
 VERSION = version_to_int(VERSION_STR)
 MINIMAL_COMPATIBLE_VERSION = version_to_int("0.0.1.1")
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def get_internal_ip(cidr_str, node_id):
-    network = ipaddress.IPv4Network(cidr_str, strict=True)
-    return str(network[node_id])
-
-
-def get_node_id_from_ip(cidr_str, ip_str):
-    network = ipaddress.IPv4Network(cidr_str, strict=True)
-    ip = ipaddress.IPv4Address(ip_str)
-    return int(ip) - int(network.network_address)
-
-
-def generate_wg_keys():
-    """Attempt to call system 'wg' command to generate a keypair."""
-    try:
-        privkey = subprocess.check_output(["wg", "genkey"], text=True).strip()
-        pubkey = subprocess.check_output(["wg", "pubkey"], input=privkey.encode(), text=True).strip()
-        return privkey, pubkey
-    except Exception as e:
-        logging.warning(f"Failed to generate keys via 'wg' command: {e!r}. Using dummy keys.")
-        return "DUMMY_PRIVKEY", "DUMMY_PUBKEY"
 
 
 class Node:
@@ -141,7 +64,7 @@ class MeshController:
         self.private_key = ""
         self.transport = None
         self.pending_acks = {}
-        logging.info(f"MeshController starting, version: {int_to_version(VERSION)}")
+        logging.info(f"MeshController starting, version: {VERSION_STR}")
         self.load_conf()
 
     def load_conf(self):
@@ -164,6 +87,8 @@ class MeshController:
         if not self.private_key or not my_pubkey:
             logging.info("Missing keys in config, generating new ones...")
             self.private_key, my_pubkey = generate_wg_keys()
+            if not self.private_key or not my_pubkey:
+                raise ValueError("Failed to generate keys")
 
         self.me = Node(
             my_id, me_cfg.get("name", f"node-{my_id}"), my_pubkey,
@@ -404,7 +329,7 @@ class MeshController:
         self.pending_acks.pop(task_key, None)
 
 
-async def main():
+async def run():
     parser = argparse.ArgumentParser(description="P2P WG Mesh Controller")
     parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
     parser.add_argument("--dry-run", action="store_true", help="Run without executing WG commands")
@@ -443,7 +368,3 @@ async def main():
     finally:
         transport.close()
         logging.info("Graceful shutdown complete.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
