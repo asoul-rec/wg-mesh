@@ -6,6 +6,7 @@ import logging
 import signal
 import struct
 import time
+import collections
 
 from .utils import version_to_int, int_to_version, get_internal_ip, get_node_id_from_ip
 from .wg import generate_wg_keys
@@ -64,6 +65,8 @@ class MeshController:
         self.private_key = ""
         self.transport = None
         self.pending_acks = {}
+        self._send_history = collections.deque()
+        self._broadcast_task = None
         logging.info(f"MeshController starting, version: {VERSION_STR}")
         self.load_conf()
 
@@ -215,6 +218,11 @@ class MeshController:
         for nid, recv_n in recv_dict.items():
             recv_content = [recv_n.get(k, '') for k in ('name', 'pubkey', 'endpoint')]
             recv_seq = recv_n.get('seq_num', 0)
+            recv_ts = recv_n.get('timestamp', 0)
+
+            if recv_ts > time.time() + 60:
+                logging.warning(f"Rejecting ghost announce for node {nid}: timestamp is far in the future (+{recv_ts - time.time():.1f}s).")
+                continue
 
             if nid not in self.known_nodes:
                 new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq, timestamp=recv_n.get('timestamp', 0))
@@ -223,25 +231,24 @@ class MeshController:
                 continue
 
             local_n = self.known_nodes[nid]
-            d = diff(nid, recv_seq)
-            recv_ts = recv_n.get('timestamp', 0)
+            seq_diff = diff(nid, recv_seq)
 
             # UTC Timestamp Veto logic
             time_diff = recv_ts - local_n.timestamp
-            if d > 0 and time_diff <= -120:
-                d = -1
-                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (timestamp {time_diff}s older)")
-            elif d <= 0 and time_diff >= 120:
-                d = 1
+            if seq_diff > 0 and time_diff <= -120:
+                seq_diff = -1
+                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (timestamp {-time_diff}s older)")
+            elif seq_diff <= 0 and time_diff >= 120:
+                seq_diff = 1
                 logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (timestamp {time_diff}s newer)")
 
             local_content = [local_n.name, local_n.pubkey, local_n.endpoint]
             conflict = (recv_content != local_content)
 
             if conflict:
-                if d <= 0 or nid == my_id:
+                if seq_diff <= 0 or nid == my_id:
                     source_needs_correction = True
-                    if d == 0 and nid != my_id:
+                    if seq_diff == 0 and nid != my_id:
                         # edge case: why same seq num but different content? just forget it.
                         del self.known_nodes[nid]
                         changed_local = True
@@ -250,9 +257,9 @@ class MeshController:
                     local_n.name, local_n.pubkey, local_n.endpoint = recv_content
                     local_n.timestamp = recv_ts
 
-            if d <= -self.STALE_TOLERANCE:
+            if seq_diff <= -self.STALE_TOLERANCE:
                 source_needs_correction = True
-            if d > 0:
+            if seq_diff > 0:
                 local_n.seq_num = recv_seq
                 if not conflict:
                     local_n.timestamp = max(local_n.timestamp, recv_ts)
@@ -296,6 +303,34 @@ class MeshController:
         self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey)
 
     def broadcast_packet(self, origin_id, seq_num, exclude_ip=None):
+        """
+        Broadcasts mesh updates. When origin_id == self.me.node_id (self-correction):
+        1. The broadcast is asynchronously throttled via exponential backoff to prevent network flooding.
+        2. The seq_num/exclude_ip parameters are ignored. The task uses self.me.seq_num and no exclude_ip
+           upon execution.
+        """
+        if origin_id == self.me.node_id:
+            if self._broadcast_task and not self._broadcast_task.done():
+                return
+            self._broadcast_task = asyncio.create_task(self._throttled_self_broadcast())
+        else:
+            self._send_broadcast_payload(origin_id, seq_num, exclude_ip)
+
+    async def _throttled_self_broadcast(self):
+        loop = asyncio.get_running_loop()
+        while self._send_history and loop.time() - self._send_history[0] > 120:
+            self._send_history.popleft()
+
+        throttle_count = len(self._send_history)
+        if throttle_count > 0:
+            sleep_time = min(0.1 * (2 ** throttle_count - 1), 20)
+            logging.info(f"Throttling self-correction broadcast... sleeping {sleep_time}s")
+            await asyncio.sleep(sleep_time)
+
+        self._send_history.append(loop.time())
+        self._send_broadcast_payload(self.me.node_id, self.me.seq_num, exclude_ip=None)
+
+    def _send_broadcast_payload(self, origin_id, seq_num, exclude_ip):
         payload_data = [node.to_dict() for node in self.known_nodes.values()]
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
 
