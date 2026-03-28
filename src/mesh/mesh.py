@@ -262,15 +262,16 @@ class MeshController:
         self.send_ack(sender_ip, origin_id, seq_num)
 
         # 2. Broadcast Decision
+        origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
-            logging.info(f"Source {origin_id} needs correction. Broadcasting merged state.")
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. Broadcasting merged state.")
             self.bump_my_seq()
             self.save_conf()
             self.broadcast_packet(self.me.node_id, self.me.seq_num)
         else:
             if changed_local:
                 self.save_conf()
-            logging.info(f"Source {origin_id} is consistent. Forwarding its broadcast.")
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. Forwarding its broadcast.")
             self.broadcast_packet(origin_id, seq_num, exclude_ip=sender_ip)
 
     def process_ack(self, origin_id, seq_num, sender_ip):
@@ -316,6 +317,10 @@ class MeshController:
         packet = struct.pack('!I', VERSION) + encrypted_data
 
         for attempt in range(3):
+            if origin_id in self.known_nodes and self.known_nodes[origin_id].seq_num != seq_num:
+                logging.debug(f"Aborting reliable_send: seq {seq_num} for node {origin_id} is now stale.")
+                break
+
             if self.transport:
                 self.transport.sendto(packet, (target_ip, 8080))
 
