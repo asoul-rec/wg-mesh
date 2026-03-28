@@ -4,22 +4,21 @@
         "name": "node-2",
         "cidr": "10.123.234.0/24",
         "seq_num": 10,
-        "private_key": "node2-pri",
-        "public_key": "node2-pub",
-        "endpoint": "node2.mesh-test.xyz:51820"
+        "private_key": "EJjkjdfbMLeXRKosb+nC0sZCfI8xyjlGDg6StIfroVM=",
+        "public_key": "ldWMAMxO7xo9z0DU/u98kIK1b1fh4LDzdLKff+QV+3c=",
+        "endpoint": "172.20.123.2:51820"
     },
     "peers": [
         {
             "node_id": 1,
-            "pubkey": "node1-pub",
-            "endpoint": "44.22.11.1:51820",
+            "pubkey": "KDrEX85VNrZhEeKdeRH6kh9BbzosLprrgYHfwNtt+gk=",
+            "endpoint": "172.20.123.1:51820",
             "seq_num": 1,
             "timestamp": 1774000000
         },
         {
             "node_id": 5,
-            "pubkey": "node5-pub",
-            "endpoint": "bridge-node-global.net:51820",
+            "pubkey": "+F0amf0jOei7x3vyeH3FxaYsKZ9M7KsRu6eNDwG0rU0=",
             "seq_num": 1
         }
     ]

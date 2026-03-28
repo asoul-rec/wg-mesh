@@ -1,8 +1,17 @@
 import logging
 import subprocess
+import os
+import asyncio
+import copy
+
+from .utils import get_internal_ip
+
+_wg_sync_running = False
 
 __all__ = [
     "generate_wg_keys",
+    "setup_wg_interface",
+    "sync_wg_peers",
 ]
 
 def generate_wg_keys():
@@ -14,3 +23,104 @@ def generate_wg_keys():
     except Exception as e:
         logging.error(f"Failed to generate keys via 'wg' command: {e!r}")
         return None, None
+
+
+def setup_wg_interface(iface_name, private_key_str, internal_ip, listen_port=51820):
+    """init wg interface, equivalent to wg-quick up"""
+    try:
+        # 1. create private key temp file
+        # For security reasons, wg does not accept private key directly from parameters
+        # Use /dev/shm to ensure the file is only in memory
+        key_path = f"/dev/shm/{iface_name}_priv"
+        with open(key_path, "w") as f:
+            f.write(private_key_str + "\n")
+        os.chmod(key_path, 0o600)
+
+        # 2. create wg interface (if already exists, ignore the error)
+        subprocess.run(["ip", "link", "add", "dev", iface_name, "type", "wireguard"], stderr=subprocess.DEVNULL)
+
+        # 3. bind private key and port
+        subprocess.run(["wg", "set", iface_name, "private-key", key_path, "listen-port", str(listen_port)], check=True)
+
+        # 4. set ip and bring up interface
+        subprocess.run(["ip", "address", "replace", internal_ip, "dev", iface_name], check=True)
+        subprocess.run(["ip", "link", "set", "up", "dev", iface_name], check=True)
+
+        os.remove(key_path)
+        logging.info(f"Interface {iface_name} setup successful with IP {internal_ip}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to setup interface {iface_name}: {e!r}")
+        raise
+
+async def _async_subprocess_run(*cmd, timeout=None):
+    """Run a subprocess with optional timeout, ensuring zombie reap on any exit path."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        if timeout is not None:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        else:
+            stdout, stderr = await proc.communicate()
+        return proc.returncode, stdout, stderr
+    except asyncio.TimeoutError:
+        raise
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except OSError:
+                pass
+
+
+async def sync_wg_peers(iface_name, known_nodes_dict, my_node_id, cidr_str):
+    """Incrementally sync WireGuard peers. Only one instance may run at a time."""
+    global _wg_sync_running
+    if _wg_sync_running:
+        raise RuntimeError("sync_wg_peers is already running concurrently!")
+    _wg_sync_running = True
+
+    try:
+        known_nodes = copy.deepcopy(known_nodes_dict)
+
+        # get current peers on the interface
+        try:
+            _, stdout, _ = await _async_subprocess_run("wg", "show", iface_name, "peers")
+            current_peers = set(stdout.decode().strip().splitlines())
+        except Exception:
+            current_peers = set()
+
+        expected_peers = set()
+
+        # 1. upsert expected peers
+        for nid, node in known_nodes.items():
+            if nid == my_node_id:
+                continue
+            expected_peers.add(node.pubkey)
+            allowed_ip = f"{get_internal_ip(cidr_str, node.node_id)}/32"
+            cmd = ["wg", "set", iface_name, "peer", node.pubkey, "allowed-ips", allowed_ip]
+            if node.endpoint:
+                cmd.extend(["endpoint", node.endpoint])
+            try:
+                rc, _, stderr = await _async_subprocess_run(*cmd, timeout=2.0)
+                if rc != 0:
+                    logging.warning(f"wg set error for peer {node.node_id}: {stderr.decode().strip()}")
+            except asyncio.TimeoutError:
+                logging.error(f"wg set timed out for peer {node.node_id} (endpoint: {node.endpoint})")
+            except Exception as e:
+                logging.error(f"wg set failed for peer {node.node_id}: {e!r}")
+
+        # 2. remove stale peers
+        for pubkey in current_peers - expected_peers:
+            try:
+                await _async_subprocess_run("wg", "set", iface_name, "peer", pubkey, "remove", timeout=2.0)
+                logging.info(f"Removed stale peer {pubkey} from {iface_name}")
+            except asyncio.TimeoutError:
+                logging.warning(f"wg remove timed out for stale peer {pubkey}")
+            except Exception as e:
+                logging.warning(f"Failed to remove stale peer {pubkey}: {e!r}")
+    finally:
+        _wg_sync_running = False

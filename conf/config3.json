@@ -4,21 +4,20 @@
         "name": "node-3",
         "cidr": "10.123.234.0/24",
         "seq_num": 4294967290,
-        "private_key": "node3-pri",
-        "public_key": "node3-pub",
-        "endpoint": "93.184.216.34:51820"
+        "private_key": "KJoNrU8bVYcbsF+jqP39SC9QQUarXh2Wzypay/HSL2A=",
+        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg=",
+        "endpoint": "172.20.123.3:51820"
     },
     "peers": [
         {
             "node_id": 4,
-            "pubkey": "node4-pub",
-            "endpoint": "node-london-4.internal.io:51820",
+            "pubkey": "lGogn8FU9sNtuJb+9fwSekysFib4N8+4gjXDdCCAMyE=",
+            "endpoint": "node4:51820",
             "seq_num": 5
         },
         {
             "node_id": 5,
-            "pubkey": "node5-pub",
-            "endpoint": "bridge-node-global.net:51820",
+            "pubkey": "+F0amf0jOei7x3vyeH3FxaYsKZ9M7KsRu6eNDwG0rU0=",
             "seq_num": 1
         }
     ]

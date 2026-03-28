@@ -9,7 +9,7 @@ import time
 import collections
 
 from .utils import version_to_int, int_to_version, get_internal_ip, get_node_id_from_ip
-from .wg import generate_wg_keys
+from .wg import generate_wg_keys, setup_wg_interface, sync_wg_peers
 from .crypto import encrypt_payload, decrypt_payload
 
 
@@ -67,6 +67,8 @@ class MeshController:
         self.pending_acks = {}
         self._send_history = collections.deque()
         self._broadcast_task = None
+        self._wg_update_pending = False
+        self._wg_task = None
         logging.info(f"MeshController starting, version: {VERSION_STR}")
         self.load_conf()
 
@@ -143,7 +145,18 @@ class MeshController:
         if self.dry_run:
             logging.info(f"[DRY-RUN] Would update WireGuard: {action} peer {node.node_id if node else 'all'}")
             return
-        raise NotImplementedError("WireGuard execution logic is not implemented yet.")
+        self._wg_update_pending = True
+        if self._wg_task and not self._wg_task.done():
+            return
+        self._wg_task = asyncio.create_task(self._async_trigger_wg_update())
+
+    async def _async_trigger_wg_update(self):
+        while self._wg_update_pending:
+            self._wg_update_pending = False
+            try:
+                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.cidr_str)
+            except Exception as e:
+                logging.error(f"Failed to sync wg peers: {e!r}")
 
     def bump_my_seq(self, jump=1):
         self.me.seq_num = (self.me.seq_num + jump) % (1 << 32)
@@ -237,10 +250,10 @@ class MeshController:
             time_diff = recv_ts - local_n.timestamp
             if seq_diff > 0 and time_diff <= -120:
                 seq_diff = -1
-                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (timestamp {-time_diff}s older)")
+                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (source {origin_id}, timestamp {-time_diff}s older)")
             elif seq_diff <= 0 and time_diff >= 120:
                 seq_diff = 1
-                logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (timestamp {time_diff}s newer)")
+                logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (source {origin_id}, timestamp {time_diff}s newer)")
 
             local_content = [local_n.name, local_n.pubkey, local_n.endpoint]
             conflict = (recv_content != local_content)
@@ -265,10 +278,13 @@ class MeshController:
                     local_n.timestamp = max(local_n.timestamp, recv_ts)
                 changed_local = True
 
-        # Merging complete, send ACK to free the sender's pending task.
+        # 2. update wg interface and send ACK
+        if changed_local:
+            self.save_conf()
+            self.trigger_wg_update()
         self.send_ack(sender_ip, origin_id, seq_num)
 
-        # 2. Broadcast Decision
+        # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
             logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. Broadcasting merged state.")
@@ -276,8 +292,6 @@ class MeshController:
             self.save_conf()
             self.broadcast_packet(self.me.node_id, self.me.seq_num)
         else:
-            if changed_local:
-                self.save_conf()
             logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. Forwarding its broadcast.")
             self.broadcast_packet(origin_id, seq_num, exclude_ip=sender_ip)
 
@@ -324,7 +338,8 @@ class MeshController:
         throttle_count = len(self._send_history)
         if throttle_count > 0:
             sleep_time = min(0.1 * (2 ** throttle_count - 1), 20)
-            logging.info(f"Throttling self-correction broadcast... sleeping {sleep_time}s")
+            if sleep_time > 1.0:
+                logging.info(f"Throttling self-correction broadcast for {sleep_time:.1f}s")
             await asyncio.sleep(sleep_time)
 
         self._send_history.append(loop.time())
@@ -390,12 +405,23 @@ async def run():
         pass
 
     my_ip = get_internal_ip(controller.cidr_str, controller.me.node_id)
-    logging.info(f"Binding UDP endpoint on {my_ip}:8080")
 
-    transport, protocol = await loop.create_datagram_endpoint(
-        lambda: MeshProtocol(controller),
-        local_addr=(my_ip, 8080)
-    )
+    logging.info(f"Spinning up wg interface on {my_ip}")
+    if not controller.dry_run:
+        prefix = controller.cidr_str.split('/')[-1]
+        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}")
+        controller.trigger_wg_update()
+    await asyncio.sleep(1)
+
+    logging.info(f"Binding UDP endpoint on {my_ip}:8080")
+    try:
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: MeshProtocol(controller),
+            local_addr=(my_ip, 8080)
+        )
+    except Exception as e:
+        logging.error(f"Failed to bind UDP endpoint ({my_ip}, 8080): {e!r}")
+        return
 
     try:
         controller.bump_my_seq()

@@ -9,6 +9,8 @@
 !/src/mesh/*.py
 
 # test environment
+!/Dockerfile
+!/.dockerignore
 !/compose.yml
 !/conf
 !/conf/*

@@ -4,28 +4,28 @@
         "name": "node-5",
         "cidr": "10.123.234.0/24",
         "seq_num": 1,
-        "private_key": "node5-pri",
-        "public_key": "node5-pub",
-        "endpoint": "bridge-node-global.net:51820"
+        "private_key": "OESTipNQy393z5TVlPTrodYczChbycE4px/FGd/eHFM=",
+        "public_key": "+F0amf0jOei7x3vyeH3FxaYsKZ9M7KsRu6eNDwG0rU0=",
+        "endpoint": "node5:51820"
     },
     "peers": [
         {
             "node_id": 1,
-            "pubkey": "old_pub_key_for_node1",
-            "endpoint": "random-old-address:51820",
+            "pubkey": "KDrEX85VNrZhEeKdeRH6kh9BbzosLprrgYHfwNtt+gk=",
+            "endpoint": "random-not-existing-domain:51820",
             "seq_num": 1234321,
             "timestamp": 1770000000
         },
         {
             "node_id": 2,
-            "pubkey": "node2-pub",
-            "endpoint": "node2.mesh-test.xyz:51820",
+            "pubkey": "ldWMAMxO7xo9z0DU/u98kIK1b1fh4LDzdLKff+QV+3c=",
+            "endpoint": "node2:51820",
             "seq_num": 2000
         },
         {
             "node_id": 3,
-            "pubkey": "node3-pub",
-            "endpoint": "93.184.216.34:51820",
+            "pubkey": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg=",
+            "endpoint": "node3:51820",
             "seq_num": 4294967290
         }
     ]
