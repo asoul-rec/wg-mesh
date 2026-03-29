@@ -8,17 +8,10 @@ import struct
 import time
 import collections
 
-from .utils import version_to_int, int_to_version, get_internal_ip, get_node_id_from_ip
+from .utils import *
+from ._version import *
 from .wg import generate_wg_keys, setup_wg_interface, sync_wg_peers
 from .crypto import encrypt_payload, decrypt_payload
-
-
-VERSION_STR = "0.0.1.1"
-VERSION = version_to_int(VERSION_STR)
-MINIMAL_COMPATIBLE_VERSION = version_to_int("0.0.1.1")
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 
 class Node:
@@ -163,6 +156,7 @@ class MeshController:
         self.me.timestamp = int(time.time())
 
     def handle_packet(self, data, sender_ip):
+        logging.debug(f"Received packet from {sender_ip}, length={len(data)}")
         if len(data) < 4:
             logging.warning(f"Bad packet from {sender_ip}, too short")
             return
@@ -192,6 +186,7 @@ class MeshController:
             self.process_ack(origin_id, seq_num, sender_ip)
 
     def process_announce(self, origin_id, seq_num, payload, sender_ip):
+        logging.debug(f"Received announce from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
         my_id = self.me.node_id
         if self.known_nodes.get(my_id) is not self.me:
             logging.error("Implementation Error: self.known_nodes[self.me.node_id] is no longer pointing to self.me")
@@ -207,6 +202,7 @@ class MeshController:
         # 1. Flood Control: Drop replayed or slightly older packets (-STALE_TOLERANCE, 0].
         # However, we allow extremely old packets to pass (they represent node amnesia recovery).
         if -self.STALE_TOLERANCE < diff(origin_id, seq_num) <= 0:
+            logging.debug(f"Dropping stale announce")
             self.send_ack(sender_ip, origin_id, seq_num)
             return
 
@@ -280,6 +276,7 @@ class MeshController:
 
         # 2. update wg interface and send ACK
         if changed_local:
+            logging.debug(f"Local mesh info updated, saving config and triggering wg update")
             self.save_conf()
             self.trigger_wg_update()
         self.send_ack(sender_ip, origin_id, seq_num)
@@ -296,6 +293,7 @@ class MeshController:
             self.broadcast_packet(origin_id, seq_num, exclude_ip=sender_ip)
 
     def process_ack(self, origin_id, seq_num, sender_ip):
+        logging.debug(f"Received ack from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
         task_key = (sender_ip, origin_id, seq_num)
         if task_key in self.pending_acks:
             self.pending_acks[task_key].set()
@@ -306,6 +304,7 @@ class MeshController:
         raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
         encrypted_data = encrypt_payload(target_pubkey, raw_data)
         packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
+        logging.debug(f"Sending packet to {target_ip}:8080, type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
         self.transport.sendto(packet, (target_ip, 8080))
 
     def send_ack(self, target_ip, origin_id, seq_num):
@@ -346,6 +345,7 @@ class MeshController:
         self._send_broadcast_payload(self.me.node_id, self.me.seq_num, exclude_ip=None)
 
     def _send_broadcast_payload(self, origin_id, seq_num, exclude_ip):
+        logging.info(f"Sending broadcast from {origin_id}, seq_num={seq_num}, exclude_ip={exclude_ip}")
         payload_data = [node.to_dict() for node in self.known_nodes.values()]
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
 
@@ -372,8 +372,8 @@ class MeshController:
                 break
 
             if self.transport:
+                logging.debug(f"Sending packet to {target_ip}:8080, type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
                 self.transport.sendto(packet, (target_ip, 8080))
-
             try:
                 await asyncio.wait_for(ack_event.wait(), timeout=3.0)
                 logging.debug(f"ACK received for {task_key}")
@@ -384,13 +384,8 @@ class MeshController:
         self.pending_acks.pop(task_key, None)
 
 
-async def run():
-    parser = argparse.ArgumentParser(description="P2P WG Mesh Controller")
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
-    parser.add_argument("--dry-run", action="store_true", help="Run without executing WG commands")
-    args = parser.parse_args()
-
-    controller = MeshController(config_file=args.config, dry_run=args.dry_run)
+async def run(config_file, dry_run):
+    controller = MeshController(config_file=config_file, dry_run=dry_run)
     loop = asyncio.get_running_loop()
 
     stop_event = asyncio.Event()
@@ -402,6 +397,7 @@ async def run():
         loop.add_signal_handler(signal.SIGTERM, handle_stop)
         loop.add_signal_handler(signal.SIGINT, handle_stop)
     except NotImplementedError:
+        logging.warning("Signal handlers not supported on this platform.")
         pass
 
     my_ip = get_internal_ip(controller.cidr_str, controller.me.node_id)
@@ -427,6 +423,7 @@ async def run():
         controller.bump_my_seq()
         controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
         # Leap increment to prevent silent broadcast rejection (e.g. if node restarted and lost config)
+        await asyncio.sleep(1)
         controller.bump_my_seq(jump=controller.STALE_TOLERANCE * 2)
         controller.save_conf()
         controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
