@@ -62,6 +62,7 @@ class MeshController:
         self._broadcast_task = None
         self._wg_update_pending = False
         self._wg_task = None
+        self._background_tasks = set()
         logging.info(f"MeshController starting, version: {VERSION_STR}")
         self.load_conf()
 
@@ -355,7 +356,9 @@ class MeshController:
             target_ip = get_internal_ip(self.cidr_str, neighbor.node_id)
             if target_ip == exclude_ip:
                 continue
-            asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
+            task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
         task_key = (target_ip, origin_id, seq_num)
