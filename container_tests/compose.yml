@@ -1,3 +1,4 @@
+name: wg_mesh_test
 services:
   node1:
     build: .
@@ -6,10 +7,10 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
     volumes:
-      - ./src:/app/src:ro
+      - ../src:/app/src:ro
       - ./runtime_conf/config1.json:/app/config.json
     networks:
-      wg_mesh_net:
+      main:
         ipv4_address: 172.20.123.1
 
   node2:
@@ -19,10 +20,10 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
     volumes:
-      - ./src:/app/src:ro
+      - ../src:/app/src:ro
       - ./runtime_conf/config2.json:/app/config.json
     networks:
-      wg_mesh_net:
+      main:
         ipv4_address: 172.20.123.2
 
   node3:
@@ -32,10 +33,10 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
     volumes:
-      - ./src:/app/src:ro
+      - ../src:/app/src:ro
       - ./runtime_conf/config3.json:/app/config.json
     networks:
-      wg_mesh_net:
+      main:
         ipv4_address: 172.20.123.3
 
   node4:
@@ -45,10 +46,10 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
     volumes:
-      - ./src:/app/src:ro
+      - ../src:/app/src:ro
       - ./runtime_conf/config4.json:/app/config.json
     networks:
-      wg_mesh_net:
+      main:
         ipv4_address: 172.20.123.4
 
   node5:
@@ -58,15 +59,15 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
     volumes:
-      - ./src:/app/src:ro
+      - ../src:/app/src:ro
       - ./runtime_conf/config5.json:/app/config.json
     command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && exec python -m src.mesh --config /app/config.json'
     networks:
-      wg_mesh_net:
+      main:
         ipv4_address: 172.20.123.5
 
 networks:
-  wg_mesh_net:
+  main:
     driver: bridge
     ipam:
       config:
