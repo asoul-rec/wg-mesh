@@ -64,7 +64,7 @@ class MeshController:
         self.transport = None
         self.pending_acks = {}
         self._send_history = collections.deque()
-        self._broadcast_task = None
+        self._announce_task = None
         self._wg_update_pending = False
         self._wg_task = None
         self._background_tasks = set()
@@ -147,9 +147,9 @@ class MeshController:
         except Exception as e:
             logging.error(f"Save conf error: {e!r}")
 
-    def trigger_wg_update(self, action="update", node=None):
+    def trigger_wg_update(self):
         if self.dry_run:
-            logging.info(f"[DRY-RUN] Would update WireGuard: {action} peer {node.node_id if node else 'all'}")
+            logging.info(f"[DRY-RUN] Would update WireGuard")
             return
         self._wg_update_pending = True
         if self._wg_task and not self._wg_task.done():
@@ -234,7 +234,8 @@ class MeshController:
             logging.error(f"Payload parse error from {sender_ip}: {e!r}")
             return
 
-        changed_local = False
+        seq_changed = False
+        topology_changed = False
         source_needs_correction = False
 
         # A. Check if the incoming broadcast is missing any nodes we know about.
@@ -257,7 +258,7 @@ class MeshController:
             if nid not in self.known_nodes:
                 new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq, timestamp=recv_n.get('timestamp', 0))
                 self.known_nodes[nid] = new_node
-                changed_local = True
+                topology_changed = True
                 continue
 
             local_n = self.known_nodes[nid]
@@ -282,10 +283,11 @@ class MeshController:
                     source_needs_correction = True
                     if seq_diff == 0 and nid != my_id:
                         # edge case: why same seq num but different content? just forget it.
+                        topology_changed = True
                         del self.known_nodes[nid]
-                        changed_local = True
                         continue
                 else:
+                    topology_changed = True
                     local_n.name, local_n.pubkey, local_n.endpoint = recv_content
                     local_n.timestamp = recv_ts
 
@@ -295,26 +297,28 @@ class MeshController:
                 local_n.seq_num = recv_seq
                 if not conflict:
                     local_n.timestamp = max(local_n.timestamp, recv_ts)
-                changed_local = True
+                seq_changed = True
 
         # 2. update wg interface and send ACK
-        if changed_local:
-            logging.debug(f"Local mesh info updated, saving config and triggering wg update")
+        if seq_changed or topology_changed:
+            logging.debug(f"Local mesh state updated, saving config")
             self.save_conf()
-            self.trigger_wg_update()
+            if topology_changed:
+                logging.info(f"Topology mutated, triggering wg update")
+                self.trigger_wg_update()
         self.send_ack(sender_ip, origin_id, seq_num)
 
         # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
             logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. "
-                         f"Broadcasting merged state.")
+                         f"Announcing merged state.")
             self.bump_my_seq()
-            self.broadcast_packet(self.me.node_id, self.me.seq_num)
+            self.announce()
         else:
             logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. "
-                         f"Forwarding its broadcast.")
-            self.broadcast_packet(origin_id, seq_num, exclude_ip=sender_ip)
+                         f"Forwarding its raw broadcast.")
+            self.broadcast(origin_id, seq_num, payload, exclude_ip=sender_ip)
 
     def process_ack(self, origin_id, seq_num, sender_ip):
         logging.debug(f"Received ack from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
@@ -328,7 +332,7 @@ class MeshController:
         raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
         encrypted_data = encrypt_payload(target_pubkey, raw_data)
         packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
-        logging.debug(f"Sending packet to {target_ip}:{self.MESH_UDP_LISTEN_PORT}, "
+        logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], "
                       f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
         self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
 
@@ -340,21 +344,16 @@ class MeshController:
         target_pubkey = self.known_nodes[sender_id].pubkey
         self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey)
 
-    def broadcast_packet(self, origin_id, seq_num, exclude_ip=None):
+    def announce(self):
         """
-        Broadcasts mesh updates. When origin_id == self.me.node_id (self-correction):
-        1. The broadcast is asynchronously throttled via exponential backoff to prevent network flooding.
-        2. The seq_num/exclude_ip parameters are ignored. The task uses self.me.seq_num and no exclude_ip
-           upon execution.
+        Announce local mesh updates.
+        The broadcast is asynchronously throttled via exponential backoff to prevent network flooding.
         """
-        if origin_id == self.me.node_id:
-            if self._broadcast_task and not self._broadcast_task.done():
-                return
-            self._broadcast_task = asyncio.create_task(self._throttled_self_broadcast())
-        else:
-            self._send_broadcast_payload(origin_id, seq_num, exclude_ip)
+        if self._announce_task and not self._announce_task.done():
+            return  # self._announce_task will announce the newest state just before finishing
+        self._announce_task = asyncio.create_task(self._throttled_announce())
 
-    async def _throttled_self_broadcast(self):
+    async def _throttled_announce(self):
         """Stateless exponential backoff for self-correction broadcasts."""
         loop = asyncio.get_running_loop()
         # relief throttling based on keepalive interval
@@ -371,18 +370,20 @@ class MeshController:
             await asyncio.sleep(sleep_time)
 
         self._send_history.append(loop.time())
-        self._send_broadcast_payload(self.me.node_id, self.me.seq_num, exclude_ip=None)
+        self._broadcast_announce()
 
-    def _send_broadcast_payload(self, origin_id, seq_num, exclude_ip):
-        logging.info(f"Sending broadcast from {origin_id}, seq_num={seq_num}, exclude_ip={exclude_ip}")
+    def _broadcast_announce(self):
+        logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
         payload_data = [node.to_dict() for node in self.known_nodes.values()]
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
+        self.broadcast(self.me.node_id, self.me.seq_num, compressed_payload)
 
+    def broadcast(self, origin_id, seq_num, compressed_payload, exclude_ip=None):
         for nid, neighbor in self.known_nodes.items():
             if nid == self.me.node_id:
                 continue
             target_ip = get_internal_ip(self.cidr_str, neighbor.node_id)
-            if target_ip == exclude_ip:
+            if exclude_ip and target_ip == exclude_ip:
                 continue
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
             self._background_tasks.add(task)
@@ -401,7 +402,7 @@ class MeshController:
                 except asyncio.TimeoutError:
                     logging.debug(f"Keepalive ({interval}s) firing broadcast")
                     self.bump_my_seq()
-                    self.broadcast_packet(self.me.node_id, self.me.seq_num)
+                    self.announce()
         except Exception as e:
             logging.warning(f"Keepalive loop failed: {e!r}")
             raise
@@ -424,7 +425,7 @@ class MeshController:
                         self._offline = False
                         # Force announce to sync seq num with peers
                         self.bump_my_seq(2 * self.STALE_TOLERANCE)
-                        self.broadcast_packet(self.me.node_id, self.me.seq_num)
+                        self.announce()
                         self.keepalive_interval = self.KEEPALIVE_STATIC_INTERVAL if self.me.endpoint else self.KEEPALIVE_ROAMING_INTERVAL
                         self._keepalive_event.set() # Wake up keepalive to revert to normal interval
                 except asyncio.TimeoutError:
@@ -451,14 +452,16 @@ class MeshController:
                 break
 
             if self.transport:
-                logging.debug(f"Sending packet to {target_ip}:8080, type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
-                self.transport.sendto(packet, (target_ip, 8080))
+                logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
+                self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
             try:
                 await asyncio.wait_for(ack_event.wait(), timeout=3.0)
                 logging.debug(f"ACK received for {task_key}")
                 break
             except asyncio.TimeoutError:
                 logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
+        else:
+            logging.info(f"Failed to send packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
 
         self.pending_acks.pop(task_key, None)
 
@@ -488,19 +491,19 @@ async def run(config_file, dry_run):
         controller.trigger_wg_update()
     await asyncio.sleep(1)
 
-    logging.info(f"Binding UDP endpoint on {my_ip}:8080")
+    logging.info(f"Binding UDP endpoint on [{my_ip}:{controller.MESH_UDP_LISTEN_PORT}]")
     try:
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: MeshProtocol(controller),
-            local_addr=(my_ip, 8080)
+            local_addr=(my_ip, controller.MESH_UDP_LISTEN_PORT)
         )
     except Exception as e:
-        logging.error(f"Failed to bind UDP endpoint ({my_ip}, 8080): {e!r}")
+        logging.error(f"Failed to bind UDP endpoint [{my_ip}:{controller.MESH_UDP_LISTEN_PORT}]: {e!r}")
         return
 
     try:
         controller.bump_my_seq()
-        controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
+        controller.announce()
         controller._keepalive_task = asyncio.create_task(controller._keepalive_loop())
         controller._online_monitor_task = asyncio.create_task(controller._online_monitor_loop())
         await stop_event.wait()

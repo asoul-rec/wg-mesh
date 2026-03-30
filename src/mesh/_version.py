@@ -6,6 +6,6 @@ __all__ = [
     "MINIMAL_COMPATIBLE_VERSION",
 ]
 
-VERSION_STR = "0.0.1.1"
+VERSION_STR = "0.0.1.2"
 VERSION = version_to_int(VERSION_STR)
 MINIMAL_COMPATIBLE_VERSION = version_to_int("0.0.1.1")
