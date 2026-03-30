@@ -1,12 +1,13 @@
 import argparse
 import asyncio
+import collections
 import compression.zstd as zstd
 import json
 import logging
+import random
 import signal
 import struct
 import time
-import collections
 
 from .utils import *
 from ._version import *
@@ -48,6 +49,10 @@ class MeshProtocol(asyncio.DatagramProtocol):
 
 class MeshController:
     STALE_TOLERANCE = 4096
+    KEEPALIVE_STATIC_INTERVAL = (600, 1200)
+    KEEPALIVE_ROAMING_INTERVAL = (15, 25)
+    KEEPALIVE_OFFLINE_INTERVAL = (12, 12)
+    MESH_UDP_LISTEN_PORT = 8080
 
     def __init__(self, config_file, dry_run=False):
         self.config_file = config_file
@@ -63,6 +68,13 @@ class MeshController:
         self._wg_update_pending = False
         self._wg_task = None
         self._background_tasks = set()
+        self._keepalive_event = asyncio.Event()
+        self._keepalive_task = None
+        self._inbound_event = asyncio.Event()
+        self._online_monitor_task = None
+        # active broadcast at start
+        self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
+        self._offline = True
         logging.info(f"MeshController starting, version: {VERSION_STR}")
         self.load_conf()
 
@@ -151,10 +163,14 @@ class MeshController:
                 await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.cidr_str)
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
+            except asyncio.CancelledError:
+                logging.info("Sync wg peers cancelled")
+                raise
 
     def bump_my_seq(self, jump=1):
         self.me.seq_num = (self.me.seq_num + jump) % (1 << 32)
         self.me.timestamp = int(time.time())
+        self.save_conf()
 
     def handle_packet(self, data, sender_ip):
         logging.debug(f"Received packet from {sender_ip}, length={len(data)}")
@@ -173,6 +189,9 @@ class MeshController:
         except Exception as e:
             logging.error(f"Failed to decrypt packet from {sender_ip}: {e!r}")
             return
+
+        # Packet decrypted and authenticated successfully
+        self._inbound_event.set()
 
         if len(decrypted) < 9:
             logging.warning(f"Malformed decrypted packet from {sender_ip}")
@@ -231,7 +250,8 @@ class MeshController:
             recv_ts = recv_n.get('timestamp', 0)
 
             if recv_ts > time.time() + 60:
-                logging.warning(f"Rejecting ghost announce for node {nid}: timestamp is far in the future (+{recv_ts - time.time():.1f}s).")
+                logging.warning(f"Rejecting ghost announce for node {nid}: timestamp is far in the future "
+                                f"(+{recv_ts - time.time():.1f}s).")
                 continue
 
             if nid not in self.known_nodes:
@@ -247,10 +267,12 @@ class MeshController:
             time_diff = recv_ts - local_n.timestamp
             if seq_diff > 0 and time_diff <= -120:
                 seq_diff = -1
-                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (source {origin_id}, timestamp {-time_diff}s older)")
+                logging.warning(f"Vetoed ghost seq {recv_seq} for node {nid} (source {origin_id}, "
+                                f"timestamp {-time_diff}s older)")
             elif seq_diff <= 0 and time_diff >= 120:
                 seq_diff = 1
-                logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (source {origin_id}, timestamp {time_diff}s newer)")
+                logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (source {origin_id}, "
+                                f"timestamp {time_diff}s newer)")
 
             local_content = [local_n.name, local_n.pubkey, local_n.endpoint]
             conflict = (recv_content != local_content)
@@ -285,12 +307,13 @@ class MeshController:
         # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. Broadcasting merged state.")
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. "
+                         f"Broadcasting merged state.")
             self.bump_my_seq()
-            self.save_conf()
             self.broadcast_packet(self.me.node_id, self.me.seq_num)
         else:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. Forwarding its broadcast.")
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. "
+                         f"Forwarding its broadcast.")
             self.broadcast_packet(origin_id, seq_num, exclude_ip=sender_ip)
 
     def process_ack(self, origin_id, seq_num, sender_ip):
@@ -305,8 +328,9 @@ class MeshController:
         raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
         encrypted_data = encrypt_payload(target_pubkey, raw_data)
         packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
-        logging.debug(f"Sending packet to {target_ip}:8080, type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
-        self.transport.sendto(packet, (target_ip, 8080))
+        logging.debug(f"Sending packet to {target_ip}:{self.MESH_UDP_LISTEN_PORT}, "
+                      f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
+        self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
 
     def send_ack(self, target_ip, origin_id, seq_num):
         sender_id = get_node_id_from_ip(self.cidr_str, target_ip)
@@ -331,8 +355,12 @@ class MeshController:
             self._send_broadcast_payload(origin_id, seq_num, exclude_ip)
 
     async def _throttled_self_broadcast(self):
+        """Stateless exponential backoff for self-correction broadcasts."""
         loop = asyncio.get_running_loop()
-        while self._send_history and loop.time() - self._send_history[0] > 120:
+        # relief throttling based on keepalive interval
+        throttle_window = min(120, self.keepalive_interval[0])
+        cutoff_time = loop.time() - throttle_window
+        while self._send_history and self._send_history[0] < cutoff_time:
             self._send_history.popleft()
 
         throttle_count = len(self._send_history)
@@ -359,6 +387,54 @@ class MeshController:
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+        self._keepalive_event.set()
+
+    async def _keepalive_loop(self):
+        """Keepalive loop: if no broadcast has fired within interval, bump seq and self-broadcast."""
+        logging.info(f"Keepalive loop started.")
+        try:
+            while True:
+                self._keepalive_event.clear()
+                interval = random.randint(*self.keepalive_interval)
+                try:
+                    await asyncio.wait_for(self._keepalive_event.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    logging.debug(f"Keepalive ({interval}s) firing broadcast")
+                    self.bump_my_seq()
+                    self.broadcast_packet(self.me.node_id, self.me.seq_num)
+        except Exception as e:
+            logging.warning(f"Keepalive loop failed: {e!r}")
+            raise
+        finally:
+            logging.info(f"Keepalive loop terminated.")
+
+    async def _online_monitor_loop(self):
+        """Online status monitor: triggers small interval if no valid packets are received from mesh."""
+        logging.info(f"Online status monitor started.")
+        try:
+            while True:
+                self._inbound_event.clear()
+                # expect to receive packet at least every keepalive_interval[1] + 3 seconds
+                timeout = self.keepalive_interval[1] + 3
+                logging.debug(f"Online status monitor waiting {timeout}s for packets")
+                try:
+                    await asyncio.wait_for(self._inbound_event.wait(), timeout=timeout)
+                    if self._offline:
+                        logging.info("Node is back online.")
+                        self._offline = False
+                        # Force announce to sync seq num with peers
+                        self.bump_my_seq(2 * self.STALE_TOLERANCE)
+                        self.broadcast_packet(self.me.node_id, self.me.seq_num)
+                        self.keepalive_interval = self.KEEPALIVE_STATIC_INTERVAL if self.me.endpoint else self.KEEPALIVE_ROAMING_INTERVAL
+                        self._keepalive_event.set() # Wake up keepalive to revert to normal interval
+                except asyncio.TimeoutError:
+                    if not self._offline:
+                        logging.warning(f"Connection lost! ({timeout}s without packets)")
+                        self._offline = True
+                        self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
+                        self._keepalive_event.set() # Wake up keepalive to enforce aggressive broadcast interval
+        finally:
+            logging.info(f"Online status monitor terminated.")
 
     async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
         task_key = (target_ip, origin_id, seq_num)
@@ -425,12 +501,17 @@ async def run(config_file, dry_run):
     try:
         controller.bump_my_seq()
         controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
-        # Leap increment to prevent silent broadcast rejection (e.g. if node restarted and lost config)
-        await asyncio.sleep(1)
-        controller.bump_my_seq(jump=controller.STALE_TOLERANCE * 2)
-        controller.save_conf()
-        controller.broadcast_packet(controller.me.node_id, controller.me.seq_num)
+        controller._keepalive_task = asyncio.create_task(controller._keepalive_loop())
+        controller._online_monitor_task = asyncio.create_task(controller._online_monitor_loop())
         await stop_event.wait()
     finally:
+        if controller._keepalive_task:
+            controller._keepalive_task.cancel()
+        if controller._online_monitor_task:
+            controller._online_monitor_task.cancel()
+        if controller._wg_task:
+            controller._wg_task.cancel()
+        for task in controller._background_tasks:
+            task.cancel()
         transport.close()
         logging.info("Graceful shutdown complete.")

@@ -5,8 +5,7 @@
         "cidr": "10.123.234.0/24",
         "seq_num": 4294967290,
         "private_key": "KJoNrU8bVYcbsF+jqP39SC9QQUarXh2Wzypay/HSL2A=",
-        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg=",
-        "endpoint": "172.20.123.3:51820"
+        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg="
     },
     "peers": [
         {
@@ -18,6 +17,7 @@
         {
             "node_id": 5,
             "pubkey": "+F0amf0jOei7x3vyeH3FxaYsKZ9M7KsRu6eNDwG0rU0=",
+            "endpoint": "node5:51820",
             "seq_num": 1
         }
     ]

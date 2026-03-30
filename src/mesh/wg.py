@@ -35,8 +35,6 @@ async def _run_async(cmd, timeout=None):
         else:
             stdout, stderr = await proc.communicate()
         return proc.returncode, stdout, stderr
-    except asyncio.TimeoutError:
-        raise
     finally:
         if proc.returncode is None:
             try:

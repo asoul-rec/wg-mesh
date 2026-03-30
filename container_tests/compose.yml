@@ -61,7 +61,7 @@ services:
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config5.json:/app/config.json
-    command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && exec python -m src.mesh --config /app/config.json'
+    command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && exec python -m src.mesh --config /app/config.json -v'
     networks:
       main:
         ipv4_address: 172.20.123.5
