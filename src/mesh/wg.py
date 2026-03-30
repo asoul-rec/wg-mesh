@@ -56,8 +56,8 @@ def generate_wg_keys():
         return None, None
 
 
-def setup_wg_interface(iface_name, private_key_str, internal_ip, listen_port=51820):
-    """init wg interface, equivalent to wg-quick up"""
+def setup_wg_interface(iface_name, private_key_str, internal_ip, node_id, listen_port=51820):
+    """init wg / vxlan interface, equivalent to wg-quick up"""
     try:
         # 1. create private key temp file
         # For security reasons, wg does not accept private key directly from parameters
@@ -79,6 +79,18 @@ def setup_wg_interface(iface_name, private_key_str, internal_ip, listen_port=518
 
         os.remove(key_path)
         logging.info(f"Interface {iface_name} setup successful with IP {internal_ip}")
+
+        # --- VXLAN POC START ---
+        vxlan_ip_cidr = "10.0." + internal_ip.split(".", 2)[-1]
+        try:
+            _run(["ip", "link", "add", "vxlan0", "type", "vxlan", "id", "100", "local", f"{internal_ip.split('/')[0]}", "dstport", "4789", "dev", "wg0"])
+            _run(["ip", "link", "set", "vxlan0", "up"])
+            _run(["ip", "addr", "add", f"{vxlan_ip_cidr}", "dev", "vxlan0"])
+            logging.info(f"VXLAN PoC overlay vxlan0 setup successful with IP {vxlan_ip_cidr}")
+        except Exception as e:
+            logging.warning(f"Failed to setup VXLAN overlay: {e!r}")
+        # --- VXLAN POC END ---
+
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to setup interface {iface_name}: {e!r}")
         raise
@@ -110,6 +122,19 @@ async def sync_wg_peers(iface_name, known_nodes_dict, my_node_id, cidr_str):
                 continue
             expected_peers.add(node.pubkey)
             allowed_ip = f"{get_internal_ip(cidr_str, node.node_id)}/32"
+
+            # --- VXLAN POC START ---
+            wgip = allowed_ip.split('/')[0]
+            try:
+                # Deliberately blind delete first to scrub duplicates, then append
+                rc, stdout, stderr = await _run_async(["bridge", "fdb", "delete", "00:00:00:00:00:00", "dev", "vxlan0", "dst", wgip])
+                logging.debug(f"delete rc: {rc}, stdout: {stdout.decode().strip()}, stderr: {stderr.decode().strip()}")
+                rc, stdout, stderr = await _run_async(["bridge", "fdb", "append", "00:00:00:00:00:00", "dev", "vxlan0", "dst", wgip])
+                logging.debug(f"append rc: {rc}, stdout: {stdout.decode().strip()}, stderr: {stderr.decode().strip()}")
+            except Exception as e:
+                logging.debug(f"VXLAN FDB sync error for {wgip}: {e!r}")
+            # --- VXLAN POC END ---
+
             cmd = ["wg", "set", iface_name, "peer", node.pubkey, "allowed-ips", allowed_ip]
             if node.endpoint:
                 cmd.extend(["endpoint", node.endpoint])

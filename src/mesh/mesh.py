@@ -487,7 +487,7 @@ async def run(config_file, dry_run):
     logging.info(f"Spinning up wg interface on {my_ip}")
     if not controller.dry_run:
         prefix = controller.cidr_str.split('/')[-1]
-        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}")
+        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}", controller.me.node_id)
         controller.trigger_wg_update()
     await asyncio.sleep(1)
 

@@ -1,7 +1,7 @@
 FROM python:3.14-alpine
 
-RUN apk add --no-cache wireguard-tools-wg
+RUN apk add --no-cache wireguard-tools-wg iproute2
 
 WORKDIR /app
 
-CMD ["python", "-m", "src.mesh", "--config", "/app/config.json", "-v"]
+CMD ["python", "-m", "src.mesh", "--config", "/app/config.json", "-vv"]
