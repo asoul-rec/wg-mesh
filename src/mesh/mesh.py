@@ -92,6 +92,7 @@ class MeshController:
             raise ValueError("Config must contain 'me.id'")
 
         self.cidr_str = me_cfg.get("cidr", "10.123.234.0/24")
+        self.vxlan_cidr_str = me_cfg.get("vxlan_cidr", "")
         self.private_key = me_cfg.get("private_key", "")
         my_pubkey = me_cfg.get("public_key", "")
 
@@ -138,7 +139,8 @@ class MeshController:
                     "timestamp": int(self.me.timestamp),
                     "private_key": self.private_key,
                     "public_key": self.me.pubkey,
-                    "endpoint": self.me.endpoint
+                    "endpoint": self.me.endpoint,
+                    "vxlan_cidr": self.vxlan_cidr_str
                 },
                 "peers": peers_data
             }
@@ -487,7 +489,7 @@ async def run(config_file, dry_run):
     logging.info(f"Spinning up wg interface on {my_ip}")
     if not controller.dry_run:
         prefix = controller.cidr_str.split('/')[-1]
-        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}", controller.me.node_id)
+        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}", controller.me.node_id, vxlan_cidr=controller.vxlan_cidr_str)
         controller.trigger_wg_update()
     await asyncio.sleep(1)
 

@@ -6,7 +6,8 @@
         "seq_num": 5,
         "private_key": "aJtwOTlu0JZXDRJihhNjKvfcT/rz8ySbYt7bPc259ms=",
         "public_key": "lGogn8FU9sNtuJb+9fwSekysFib4N8+4gjXDdCCAMyE=",
-        "endpoint": "172.20.123.4:51820"
+        "endpoint": "172.20.123.4:51820",
+        "vxlan_cidr": "10.7.0.0/24"
     },
     "peers": [
         {

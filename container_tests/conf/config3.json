@@ -5,7 +5,8 @@
         "cidr": "10.123.234.0/24",
         "seq_num": 4294967290,
         "private_key": "KJoNrU8bVYcbsF+jqP39SC9QQUarXh2Wzypay/HSL2A=",
-        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg="
+        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg=",
+        "vxlan_cidr": "10.7.0.0/24"
     },
     "peers": [
         {

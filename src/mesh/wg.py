@@ -56,7 +56,7 @@ def generate_wg_keys():
         return None, None
 
 
-def setup_wg_interface(iface_name, private_key_str, internal_ip, node_id, listen_port=51820):
+def setup_wg_interface(iface_name, private_key_str, internal_ip, node_id, listen_port=51820, vxlan_cidr=""):
     """init wg / vxlan interface, equivalent to wg-quick up"""
     try:
         # 1. create private key temp file
@@ -81,14 +81,17 @@ def setup_wg_interface(iface_name, private_key_str, internal_ip, node_id, listen
         logging.info(f"Interface {iface_name} setup successful with IP {internal_ip}")
 
         # --- VXLAN POC START ---
-        vxlan_ip_cidr = "10.0." + internal_ip.split(".", 2)[-1]
-        try:
-            _run(["ip", "link", "add", "vxlan0", "type", "vxlan", "id", "100", "local", f"{internal_ip.split('/')[0]}", "dstport", "4789", "dev", "wg0"])
-            _run(["ip", "link", "set", "vxlan0", "up"])
-            _run(["ip", "addr", "add", f"{vxlan_ip_cidr}", "dev", "vxlan0"])
-            logging.info(f"VXLAN PoC overlay vxlan0 setup successful with IP {vxlan_ip_cidr}")
-        except Exception as e:
-            logging.warning(f"Failed to setup VXLAN overlay: {e!r}")
+        if vxlan_cidr:
+            vxlan_ip = get_internal_ip(vxlan_cidr, node_id)
+            vxlan_ip_cidr = f"{vxlan_ip}/{vxlan_cidr.split('/')[-1]}"
+            try:
+                _run(["ip", "link", "add", "vxlan0", "type", "vxlan", "id", "100",
+                      "local", str(internal_ip.split('/')[0]), "dstport", "4789", "dev", iface_name])
+                _run(["ip", "link", "set", "vxlan0", "up"])
+                _run(["ip", "addr", "add", str(vxlan_ip_cidr), "dev", "vxlan0"])
+                logging.info(f"VXLAN PoC overlay vxlan0 setup successful with IP {vxlan_ip_cidr}")
+            except Exception as e:
+                logging.warning(f"Failed to setup VXLAN overlay: {e!r}")
         # --- VXLAN POC END ---
 
     except subprocess.CalledProcessError as e:
