@@ -11,29 +11,9 @@ import time
 
 from .utils import *
 from ._version import *
-from .wg import generate_wg_keys, setup_wg_interface, sync_wg_peers
+from .wg import setup_wg_interface, sync_wg_peers
 from .crypto import encrypt_payload, decrypt_payload
-
-
-class Node:
-    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0, timestamp=0):
-        self.node_id = int(node_id)
-        self.name = name
-        self.pubkey = pubkey
-        self.endpoint = endpoint
-        self.seq_num = seq_num
-        self.timestamp = timestamp
-        self.last_seen = time.time()
-
-    def to_dict(self):
-        return {
-            "node_id": self.node_id,
-            "name": self.name,
-            "pubkey": self.pubkey,
-            "endpoint": self.endpoint,
-            "seq_num": self.seq_num,
-            "timestamp": int(self.timestamp)
-        }
+from .node import Node, load_conf, save_conf
 
 
 class MeshProtocol(asyncio.DatagramProtocol):
@@ -59,8 +39,6 @@ class MeshController:
         self.dry_run = dry_run
         self.known_nodes = {}
         self.me = None
-        self.cidr_str = ""
-        self.private_key = ""
         self.transport = None
         self.pending_acks = {}
         self._send_history = collections.deque()
@@ -79,73 +57,12 @@ class MeshController:
         self.load_conf()
 
     def load_conf(self):
-        try:
-            with open(self.config_file, 'r') as f:
-                data = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to load {self.config_file}: {e!r}")
-            raise RuntimeError("Valid configuration file is required.")
-
-        me_cfg = data.get("me", {})
-        my_id = me_cfg.get("id")
-        if not my_id:
-            raise ValueError("Config must contain 'me.id'")
-
-        self.cidr_str = me_cfg.get("cidr", "10.123.234.0/24")
-        self.private_key = me_cfg.get("private_key", "")
-        my_pubkey = me_cfg.get("public_key", "")
-
-        if not self.private_key or not my_pubkey:
-            logging.info("Missing keys in config, generating new ones...")
-            self.private_key, my_pubkey = generate_wg_keys()
-            if not self.private_key or not my_pubkey:
-                raise ValueError("Failed to generate keys")
-
-        self.me = Node(
-            my_id, me_cfg.get("name", f"node-{my_id}"), my_pubkey,
-            me_cfg.get("endpoint", ""), me_cfg.get("seq_num", 0),
-            me_cfg.get("timestamp", int(time.time()))
-        )
-
-        peers_cfg = data.get("peers", [])
-        for info in peers_cfg:
-            try:
-                peer_id = info['node_id']
-                peer_key = info['pubkey']
-            except KeyError:
-                # skip peer without required fields
-                continue
-            self.known_nodes[peer_id] = Node(
-                peer_id, info.get("name", f"node-{peer_id}"), peer_key,
-                info.get("endpoint", ""), info.get("seq_num", 0),
-                info.get("timestamp", 0)
-            )
-
-        self.known_nodes[self.me.node_id] = self.me  # must be the same pointer
+        self.me, self.known_nodes = load_conf(self.config_file)
         self.save_conf()
-
         logging.info(f"Loaded {len(self.known_nodes)} nodes (including self) from {self.config_file}")
 
     def save_conf(self):
-        try:
-            peers_data = [node.to_dict() for node in self.known_nodes.values()]
-            data = {
-                "me": {
-                    "id": self.me.node_id,
-                    "name": self.me.name,
-                    "cidr": self.cidr_str,
-                    "seq_num": self.me.seq_num,
-                    "timestamp": int(self.me.timestamp),
-                    "private_key": self.private_key,
-                    "public_key": self.me.pubkey,
-                    "endpoint": self.me.endpoint
-                },
-                "peers": peers_data
-            }
-            with open(self.config_file, 'w') as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            logging.error(f"Save conf error: {e!r}")
+        save_conf(self.config_file, self.me, self.known_nodes)
 
     def trigger_wg_update(self):
         if self.dry_run:
@@ -160,7 +77,7 @@ class MeshController:
         while self._wg_update_pending:
             self._wg_update_pending = False
             try:
-                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.cidr_str)
+                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.cidr)
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
             except asyncio.CancelledError:
@@ -208,7 +125,7 @@ class MeshController:
     def process_announce(self, origin_id, seq_num, payload, sender_ip):
         logging.debug(f"Received announce from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
         my_id = self.me.node_id
-        if self.known_nodes.get(my_id) is not self.me:
+        if self.known_nodes.get(my_id) is not self.me.node:
             logging.error("Implementation Error: self.known_nodes[self.me.node_id] is no longer pointing to self.me")
             return
 
@@ -311,12 +228,12 @@ class MeshController:
         # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) needs correction. "
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.cidr, origin_id)}) needs correction. "
                          f"Announcing merged state.")
             self.bump_my_seq()
             self.announce()
         else:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.cidr_str, origin_id)}) is consistent. "
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.cidr, origin_id)}) is consistent. "
                          f"Forwarding its raw broadcast.")
             self.broadcast(origin_id, seq_num, payload, exclude_ip=sender_ip)
 
@@ -337,7 +254,7 @@ class MeshController:
         self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
 
     def send_ack(self, target_ip, origin_id, seq_num):
-        sender_id = get_node_id_from_ip(self.cidr_str, target_ip)
+        sender_id = get_node_id_from_ip(self.me.cidr, target_ip)
         if sender_id not in self.known_nodes:
             logging.error(f"Cannot send ACK, missing pubkey for immediate sender IP {target_ip} (node {sender_id})")
             return
@@ -382,7 +299,7 @@ class MeshController:
         for nid, neighbor in self.known_nodes.items():
             if nid == self.me.node_id:
                 continue
-            target_ip = get_internal_ip(self.cidr_str, neighbor.node_id)
+            target_ip = get_internal_ip(self.me.cidr, neighbor.node_id)
             if exclude_ip and target_ip == exclude_ip:
                 continue
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
@@ -482,12 +399,12 @@ async def run(config_file, dry_run):
         logging.warning("Signal handlers not supported on this platform.")
         pass
 
-    my_ip = get_internal_ip(controller.cidr_str, controller.me.node_id)
+    my_ip = get_internal_ip(controller.me.cidr, controller.me.node_id)
 
     logging.info(f"Spinning up wg interface on {my_ip}")
     if not controller.dry_run:
-        prefix = controller.cidr_str.split('/')[-1]
-        setup_wg_interface("wg0", controller.private_key, f"{my_ip}/{prefix}")
+        prefix = controller.me.cidr.split('/')[-1]
+        setup_wg_interface("wg0", controller.me.private_key, f"{my_ip}/{prefix}")
         controller.trigger_wg_update()
     await asyncio.sleep(1)
 
