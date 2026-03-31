@@ -273,23 +273,21 @@ class MeshController:
     async def _throttled_announce(self):
         """Stateless exponential backoff for self-correction broadcasts."""
         loop = asyncio.get_running_loop()
-        # relief throttling based on keepalive interval
+        # Relief throttling based on keepalive interval
         throttle_window = min(120, self.keepalive_interval[0])
         cutoff_time = loop.time() - throttle_window
         while self._send_history and self._send_history[0] < cutoff_time:
             self._send_history.popleft()
-
+        # Exponential backoff
         throttle_count = len(self._send_history)
         if throttle_count > 0:
             sleep_time = min(0.1 * (2 ** throttle_count - 1), 20)
             if sleep_time > 1.0:
                 logging.info(f"Throttling self-correction broadcast for {sleep_time:.1f}s")
             await asyncio.sleep(sleep_time)
-
+        # Do broadcast
         self._send_history.append(loop.time())
-        self._broadcast_announce()
-
-    def _broadcast_announce(self):
+        self.bump_my_seq()
         logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
         payload_data = [node.to_dict() for node in self.known_nodes.values()]
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
@@ -318,7 +316,6 @@ class MeshController:
                     await asyncio.wait_for(self._keepalive_event.wait(), timeout=interval)
                 except asyncio.TimeoutError:
                     logging.debug(f"Keepalive ({interval}s) firing broadcast")
-                    self.bump_my_seq()
                     self.announce()
         except Exception as e:
             logging.warning(f"Keepalive loop failed: {e!r}")
