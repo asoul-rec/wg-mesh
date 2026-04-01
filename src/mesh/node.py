@@ -2,15 +2,19 @@ import time
 import json
 import logging
 from .wg import generate_wg_keys
+from contextlib import contextmanager
 
 class Node:
-    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0, timestamp=0):
+    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "_protected"}
+    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0, timestamp=0, *, protected=False):
+        super().__setattr__("_protected", False)
         self.node_id = int(node_id)
         self.name = name
         self.pubkey = pubkey
         self.endpoint = endpoint
         self.seq_num = seq_num
         self.timestamp = timestamp
+        self._protected = protected
 
     def to_dict(self):
         return {
@@ -21,6 +25,21 @@ class Node:
             "seq_num": self.seq_num,
             "timestamp": self.timestamp
         }
+
+    @contextmanager
+    def _force_write(self):
+        old_val = self._protected
+        super().__setattr__("_protected", False)
+        try:
+            yield
+        finally:
+            super().__setattr__("_protected", old_val)
+
+    def __setattr__(self, field, value):
+        if self._protected and field in self._protected_fields:
+            raise AttributeError(f"Node(id={self.node_id}, name={self.name}).{field} is read-only")
+        super().__setattr__(field, value)
+
 
 class LocalNode:
     def __init__(self, node, **kwargs):
@@ -62,7 +81,8 @@ def load_conf(config_file):
     node_me = Node(
         my_id, me_cfg.get("name", f"node-{my_id}"), my_pubkey,
         me_cfg.get("endpoint", ""), me_cfg.get("seq_num", 0),
-        me_cfg.get("timestamp", int(time.time()))
+        me_cfg.get("timestamp", int(time.time())),
+        protected=True
     )
     me = LocalNode(node_me, private_key=private_key, cidr=cidr_str)
 

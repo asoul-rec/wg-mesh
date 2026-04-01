@@ -118,7 +118,11 @@ class MeshController:
         payload_data = decrypted[9:]
 
         if pkt_type == 1:
-            self.process_announce(origin_id, seq_num, payload_data, sender_ip)
+            # this will not happen for well-behaved neighbors
+            if origin_id == self.me.node_id:
+                logging.warning(f"{sender_ip} sent my announce back to me, dropping")
+            else:
+                self.process_announce(origin_id, seq_num, payload_data, sender_ip)
         elif pkt_type == 2:
             self.process_ack(origin_id, seq_num, sender_ip)
 
@@ -127,6 +131,9 @@ class MeshController:
         my_id = self.me.node_id
         if self.known_nodes.get(my_id) is not self.me.node:
             logging.error("Implementation Error: self.known_nodes[self.me.node_id] is no longer pointing to self.me")
+            return
+        if origin_id == my_id:
+            logging.error("Cannot process announce from self")
             return
 
         def diff(nid, r_seq):
@@ -298,7 +305,7 @@ class MeshController:
             if nid == self.me.node_id:
                 continue
             target_ip = get_internal_ip(self.me.cidr, neighbor.node_id)
-            if exclude_ip and target_ip == exclude_ip:
+            if exclude_ip and target_ip == exclude_ip or target_ip == get_internal_ip(self.me.cidr, origin_id):
                 continue
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
             self._background_tasks.add(task)
@@ -311,11 +318,11 @@ class MeshController:
         try:
             while True:
                 self._keepalive_event.clear()
-                interval = random.randint(*self.keepalive_interval)
+                interval = random.uniform(*self.keepalive_interval)
                 try:
                     await asyncio.wait_for(self._keepalive_event.wait(), timeout=interval)
                 except asyncio.TimeoutError:
-                    logging.debug(f"Keepalive ({interval}s) firing broadcast")
+                    logging.debug(f"Keepalive ({interval:.3f}s) firing broadcast")
                     self.announce()
         except Exception as e:
             logging.warning(f"Keepalive loop failed: {e!r}")
