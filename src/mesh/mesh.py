@@ -152,8 +152,16 @@ class MeshController:
 
         try:
             uncompressed = zstd.decompress(payload)
-            payload_nodes = json.loads(uncompressed.decode('utf-8'))
-            recv_dict = {n['node_id']: n for n in payload_nodes}
+            payload_data = json.loads(uncompressed.decode('utf-8'))
+            if isinstance(payload_data, list):  # 0.0.1.1 backward compatibility
+                payload_data = {"nodes": payload_data, "cidr": None}
+
+            recv_cidr = payload_data.get("cidr")
+            if recv_cidr and recv_cidr != self.me.cidr:
+                logging.warning(f"Dropping announce from {sender_ip}: mismatched CIDR ({recv_cidr} != {self.me.cidr})")
+                return
+
+            recv_dict = {n['node_id']: n for n in payload_data.get("nodes", [])}
         except Exception as e:
             logging.error(f"Payload parse error from {sender_ip}: {e!r}")
             return
@@ -296,16 +304,19 @@ class MeshController:
         self._send_history.append(loop.time())
         self.bump_my_seq()
         logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
-        payload_data = [node.to_dict() for node in self.known_nodes.values()]
+        payload_data = {
+            "cidr": self.me.cidr,
+            "nodes": [node.to_dict() for node in self.known_nodes.values()]
+        }
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
         self.broadcast(self.me.node_id, self.me.seq_num, compressed_payload)
 
     def broadcast(self, origin_id, seq_num, compressed_payload, exclude_ip=None):
         for nid, neighbor in self.known_nodes.items():
-            if nid == self.me.node_id:
+            if nid == self.me.node_id or nid == origin_id:
                 continue
-            target_ip = get_internal_ip(self.me.cidr, neighbor.node_id)
-            if exclude_ip and target_ip == exclude_ip or target_ip == get_internal_ip(self.me.cidr, origin_id):
+            target_ip = get_internal_ip(self.me.cidr, nid)
+            if exclude_ip and target_ip == exclude_ip:
                 continue
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
             self._background_tasks.add(task)
@@ -365,7 +376,7 @@ class MeshController:
 
         raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
         encrypted_data = encrypt_payload(target_pubkey, raw_data)
-        packet = struct.pack('!I', VERSION) + encrypted_data
+        packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
 
         for attempt in range(3):
             if origin_id in self.known_nodes and self.known_nodes[origin_id].seq_num != seq_num:
