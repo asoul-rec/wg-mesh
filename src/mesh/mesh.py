@@ -96,8 +96,8 @@ class MeshController:
             return
 
         pkt_version, = struct.unpack('!I', data[:4])
-        if pkt_version > VERSION:
-            logging.error(f"Cannot process package: minimal version {int_to_version(pkt_version)}, "
+        if pkt_version >> 8 != VERSION >> 8:
+            logging.error(f"Cannot process package with incompatible version {int_to_version(pkt_version)}, "
                           f"current version {VERSION_STR}")
             return
 
@@ -110,23 +110,23 @@ class MeshController:
         # Packet decrypted and authenticated successfully
         self._inbound_event.set()
 
-        if len(decrypted) < 9:
+        if len(decrypted) < 20:
             logging.warning(f"Malformed decrypted packet from {sender_ip}")
             return
 
-        pkt_type, origin_id, seq_num = struct.unpack('!BII', decrypted[:9])
-        payload_data = decrypted[9:]
+        pkt_type, origin_id, seq_num, pkt_tag = struct.unpack('!BIIB', decrypted[:10])
+        payload_data = decrypted[20:]
 
         if pkt_type == 1:
             # this will not happen for well-behaved neighbors
             if origin_id == self.me.node_id:
                 logging.warning(f"{sender_ip} sent my announce back to me, dropping")
             else:
-                self.process_announce(origin_id, seq_num, payload_data, sender_ip)
+                self.process_announce(origin_id, seq_num, pkt_tag, payload_data, sender_ip)
         elif pkt_type == 2:
-            self.process_ack(origin_id, seq_num, sender_ip)
+            self.process_ack(origin_id, seq_num, sender_ip, pkt_tag)
 
-    def process_announce(self, origin_id, seq_num, payload, sender_ip):
+    def process_announce(self, origin_id, seq_num, pkt_tag, payload, sender_ip):
         logging.debug(f"Received announce from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
         my_id = self.me.node_id
         if self.known_nodes.get(my_id) is not self.me.node:
@@ -147,14 +147,12 @@ class MeshController:
         # However, we allow extremely old packets to pass (they represent node amnesia recovery).
         if -self.STALE_TOLERANCE < diff(origin_id, seq_num) <= 0:
             logging.debug(f"Dropping stale announce")
-            self.send_ack(sender_ip, origin_id, seq_num)
+            self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
             return
 
         try:
             uncompressed = zstd.decompress(payload)
             payload_data = json.loads(uncompressed.decode('utf-8'))
-            if isinstance(payload_data, list):  # 0.0.1.1 backward compatibility
-                payload_data = {"nodes": payload_data, "cidr": None}
 
             recv_cidr = payload_data.get("cidr")
             if recv_cidr and recv_cidr != self.me.cidr:
@@ -238,7 +236,7 @@ class MeshController:
             if topology_changed:
                 logging.info(f"Topology mutated, triggering wg update")
                 self.trigger_wg_update()
-        self.send_ack(sender_ip, origin_id, seq_num)
+        self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
 
         # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
@@ -252,29 +250,30 @@ class MeshController:
                          f"Forwarding its raw broadcast.")
             self.broadcast(origin_id, seq_num, payload, exclude_ip=sender_ip)
 
-    def process_ack(self, origin_id, seq_num, sender_ip):
-        logging.debug(f"Received ack from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
+    def process_ack(self, origin_id, seq_num, sender_ip, pkt_tag):
+        loop = asyncio.get_running_loop()
+        logging.debug(f"Received ack from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}, pkt_tag={pkt_tag}")
         task_key = (sender_ip, origin_id, seq_num)
         if task_key in self.pending_acks:
-            self.pending_acks[task_key].set()
+            self.pending_acks[task_key].put_nowait((pkt_tag, loop.time()))
 
-    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, target_pubkey, payload=b""):
+    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, target_pubkey, payload=b"", pkt_tag=0):
         if not self.transport:
             return
-        raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
+        raw_data = struct.pack('!BIIB10s', pkt_type, origin_id, seq_num, pkt_tag, b'\x00'*10) + payload
         encrypted_data = encrypt_payload(target_pubkey, raw_data)
-        packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
+        packet = struct.pack('!I', VERSION) + encrypted_data
         logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], "
-                      f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
+                      f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}, tag: {pkt_tag}")
         self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
 
-    def send_ack(self, target_ip, origin_id, seq_num):
+    def send_ack(self, target_ip, origin_id, seq_num, pkt_tag):
         sender_id = get_node_id_from_ip(self.me.cidr, target_ip)
         if sender_id not in self.known_nodes:
             logging.error(f"Cannot send ACK, missing pubkey for immediate sender IP {target_ip} (node {sender_id})")
             return
         target_pubkey = self.known_nodes[sender_id].pubkey
-        self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey)
+        self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey, pkt_tag=pkt_tag)
 
     def announce(self):
         """
@@ -370,32 +369,53 @@ class MeshController:
             logging.info(f"Online status monitor terminated.")
 
     async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
+        """
+        Sends a packet reliably with up to 3 retry attempts and a 3s timeout for each.
+        Uses an asyncio.Queue[tag] to record RTT
+        - If tag matches current attempt: RTT is recorded.
+        - If tag is stale: Return immediately without recording RTT.
+        - On timeout: the attempt is marked as lost.
+        """
         task_key = (target_ip, origin_id, seq_num)
-        ack_event = asyncio.Event()
-        self.pending_acks[task_key] = ack_event
-
-        raw_data = struct.pack('!BII', pkt_type, origin_id, seq_num) + payload
-        encrypted_data = encrypt_payload(target_pubkey, raw_data)
-        packet = struct.pack('!I', MINIMAL_COMPATIBLE_VERSION) + encrypted_data
-
-        for attempt in range(3):
-            if origin_id in self.known_nodes and self.known_nodes[origin_id].seq_num != seq_num:
-                logging.debug(f"Aborting reliable_send: seq {seq_num} for node {origin_id} is now stale.")
-                break
-
-            if self.transport:
-                logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
+        # We use queue as event with tag as value
+        ack_queue = asyncio.Queue()
+        self.pending_acks[task_key] = ack_queue
+        try:
+            target_nid = get_node_id_from_ip(self.me.cidr, target_ip)
+            loop = asyncio.get_running_loop()
+            for attempt in range(3):
+                # Ensure the current task is still valid
+                if origin_id not in self.known_nodes or self.known_nodes[origin_id].seq_num != seq_num:
+                    logging.debug(f"Aborting reliable_send: seq {seq_num} for node {origin_id} is now stale.")
+                    return
+                if not self.transport:
+                    logging.warning(f"Transport is not ready, aborting reliable_send")
+                    return
+                # Send data
+                raw_data = struct.pack('!BIIB10s', pkt_type, origin_id, seq_num, attempt, b'\x00'*10) + payload
+                encrypted_data = encrypt_payload(target_pubkey, raw_data)
+                packet = struct.pack('!I', VERSION) + encrypted_data
+                logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}, tag: {attempt}")
                 self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
-            try:
-                await asyncio.wait_for(ack_event.wait(), timeout=3.0)
-                logging.debug(f"ACK received for {task_key}")
-                break
-            except asyncio.TimeoutError:
-                logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
-        else:
+                # Process ack
+                start_time = loop.time()
+                try:
+                    recv_tag, recv_time = await asyncio.wait_for(ack_queue.get(), timeout=3.0)
+                    if recv_tag == attempt:
+                        logging.debug(f"ACK received for {task_key}, pkt_tag={recv_tag}")
+                        if target_nid in self.known_nodes:
+                            self.known_nodes[target_nid].record_traffic_stat(timestamp=start_time, rtt=round((recv_time - start_time) * 1000))
+                    else:
+                        logging.debug(f"Stale ACK received for {task_key}, expected tag {attempt}, got {recv_tag}. Aborting further retries.")
+                    return
+                except asyncio.TimeoutError:
+                    logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
+                    if target_nid in self.known_nodes:
+                        self.known_nodes[target_nid].record_traffic_stat(timestamp=start_time, rtt=-1)
+            # All attempts failed
             logging.info(f"Failed to send packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
-
-        self.pending_acks.pop(task_key, None)
+        finally:
+            self.pending_acks.pop(task_key, None)
 
 
 async def run(config_file, dry_run):

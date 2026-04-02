@@ -1,6 +1,7 @@
 import time
 import json
 import logging
+import collections
 from .wg import generate_wg_keys
 from contextlib import contextmanager
 
@@ -15,6 +16,11 @@ class Node:
         self.seq_num = seq_num
         self.timestamp = timestamp
         self._protected = protected
+        self._traffic_stats = collections.deque(maxlen=100)
+
+    def record_traffic_stat(self, **kwargs):
+        self._traffic_stats.append(kwargs)
+        logging.debug(f"Stats for node {self.node_id}: {list(self._traffic_stats)[-10:]}")
 
     def to_dict(self):
         return {
