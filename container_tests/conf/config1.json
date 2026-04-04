@@ -3,6 +3,8 @@
         "id": 1,
         "name": "node-1",
         "cidr": "10.123.234.0/24",
+        "gre_network": "10.124.234.0/24",
+        "vxlan_network": "10.125.234.0/24",
         "seq_num": 1,
         "private_key": "AOQ5yUTeHxshA49Hqo+EaI21lItgKEGvyXP7GLxFCl4=",
         "public_key": "KDrEX85VNrZhEeKdeRH6kh9BbzosLprrgYHfwNtt+gk=",

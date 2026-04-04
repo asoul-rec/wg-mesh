@@ -2,7 +2,9 @@
     "me": {
         "id": 5,
         "name": "node-5",
-        "cidr": "10.123.234.0/24",
+        "network": "10.123.234.0/24",
+        "gre_network": "10.124.234.0/24",
+        "vxlan_network": "10.125.234.0/24",
         "seq_num": 1,
         "private_key": "OESTipNQy393z5TVlPTrodYczChbycE4px/FGd/eHFM=",
         "public_key": "+F0amf0jOei7x3vyeH3FxaYsKZ9M7KsRu6eNDwG0rU0=",

@@ -2,64 +2,91 @@ import time
 import json
 import logging
 import collections
-from .wg import generate_wg_keys
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
+from .linux_net.wg import generate_wg_keys
+
+
+@dataclass
 class Node:
-    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "_protected"}
-    def __init__(self, node_id, name, pubkey, endpoint="", seq_num=0, timestamp=0, *, protected=False):
-        super().__setattr__("_protected", False)
-        self.node_id = int(node_id)
-        self.name = name
-        self.pubkey = pubkey
-        self.endpoint = endpoint
-        self.seq_num = seq_num
-        self.timestamp = timestamp
-        self._protected = protected
+    node_id: int
+    name: str
+    pubkey: str = field(default="", repr=False)
+    endpoint: str = ""
+    seq_num: int = field(default=0, repr=False)
+    timestamp: int = field(default=0, repr=False)
+    protected: bool = field(default=False, kw_only=True)
+    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "protected", "_initialized"}
+    _initialized = False
+
+
+    def __post_init__(self):
         self._traffic_stats = collections.deque(maxlen=100)
+        self._initialized = True
 
     def record_traffic_stat(self, **kwargs):
         self._traffic_stats.append(kwargs)
         logging.debug(f"Stats for node {self.node_id}: {list(self._traffic_stats)[-10:]}")
 
     def to_dict(self):
-        return {
+        d = {
             "node_id": self.node_id,
             "name": self.name,
             "pubkey": self.pubkey,
-            "endpoint": self.endpoint,
             "seq_num": self.seq_num,
             "timestamp": self.timestamp
         }
+        if self.endpoint:
+            d["endpoint"] = self.endpoint
+        return d
 
     @contextmanager
     def _force_write(self):
-        old_val = self._protected
-        super().__setattr__("_protected", False)
+        old_val = self.protected
+        super().__setattr__("protected", False)
         try:
             yield
         finally:
-            super().__setattr__("_protected", old_val)
+            super().__setattr__("protected", old_val)
 
     def __setattr__(self, field, value):
-        if self._protected and field in self._protected_fields:
-            raise AttributeError(f"Node(id={self.node_id}, name={self.name}).{field} is read-only")
+        if self.protected and field in self._protected_fields and self._initialized:
+            raise AttributeError(f"{self}.{field} is read-only")
         super().__setattr__(field, value)
 
 
+@dataclass(kw_only=True)
 class LocalNode:
-    def __init__(self, node, **kwargs):
-        super().__setattr__("node", node)
-        self.__dict__.update(kwargs)
+    node: Node
+    private_key: str = field(repr=False)
+    network: str
+    gre_network: str = ""
+    vxlan_network: str = ""
+    _initialized = False
+
+    def __post_init__(self):
+        self._initialized = True
 
     def __getattr__(self, name):
         return getattr(self.node, name)
 
     def __setattr__(self, name, value):
-        if hasattr(self.node, name):
+        if self._initialized and hasattr(self.node, name):
             setattr(self.node, name, value)
         else:
             super().__setattr__(name, value)
+
+    def to_dict(self):
+        d = self.node.to_dict()
+        d["private_key"] = self.private_key
+        d["network"] = self.network
+        if self.gre_network:
+            d["gre_network"] = self.gre_network
+        if self.vxlan_network:
+            d["vxlan_network"] = self.vxlan_network
+        return d
+
 
 def load_conf(config_file):
     try:
@@ -74,7 +101,9 @@ def load_conf(config_file):
     if not my_id:
         raise ValueError("Config must contain 'me.id'")
 
-    cidr_str = me_cfg.get("cidr", "10.123.234.0/24")
+    network_str = me_cfg.get("network", me_cfg.get("cidr", "10.123.234.0/24"))
+    gre_network_str = me_cfg.get("gre_network", "")
+    vxlan_network_str = me_cfg.get("vxlan_network", "")
     private_key = me_cfg.get("private_key", "")
     my_pubkey = me_cfg.get("public_key", "")
 
@@ -90,7 +119,13 @@ def load_conf(config_file):
         me_cfg.get("timestamp", int(time.time())),
         protected=True
     )
-    me = LocalNode(node_me, private_key=private_key, cidr=cidr_str)
+    me = LocalNode(
+        node=node_me,
+        private_key=private_key,
+        network=network_str,
+        gre_network=gre_network_str,
+        vxlan_network=vxlan_network_str
+    )
 
     known_nodes = {}
     peers_cfg = data.get("peers", [])
@@ -111,19 +146,20 @@ def load_conf(config_file):
 
 def save_conf(config_file, me, known_nodes):
     try:
-        peers_data = [node.to_dict() for node in known_nodes.values()]
+        me_dict = me.to_dict()
+        # compatibility with old configs
+        me_dict["id"] = me_dict.pop("node_id")
+        me_dict["public_key"] = me_dict.pop("pubkey")
+        # reorder keys
+        for key in [
+            "id", "name", "private_key", "public_key", "endpoint", "network",
+            "gre_network", "vxlan_network", "seq_num", "timestamp"
+        ]:
+            if key in me_dict:
+                me_dict[key] = me_dict.pop(key)
         data = {
-            "me": {
-                "id": me.node_id,
-                "name": me.name,
-                "cidr": me.cidr,
-                "seq_num": me.seq_num,
-                "timestamp": me.timestamp,
-                "private_key": me.private_key,
-                "public_key": me.pubkey,
-                "endpoint": me.endpoint
-            },
-            "peers": peers_data
+            "me": me_dict,
+            "peers": [node.to_dict() for node in known_nodes.values()]
         }
         with open(config_file, 'w') as f:
             json.dump(data, f, indent=4)

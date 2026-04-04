@@ -3,9 +3,9 @@ import subprocess
 import os
 import asyncio
 import copy
-import shlex
 
-from .utils import get_internal_ip
+from ..utils import get_internal_ip
+from .proc import _run, _run_async
 
 
 __all__ = [
@@ -13,35 +13,6 @@ __all__ = [
     "setup_wg_interface",
     "sync_wg_peers",
 ]
-
-
-def _run(cmd, **kwargs):
-    """Wrapper around subprocess.run that logs the command at DEBUG level."""
-    logging.debug(f"Exec: $ {shlex.join(cmd)}")
-    return subprocess.run(cmd, **kwargs)
-
-
-async def _run_async(cmd, timeout=None):
-    """Run a subprocess with optional timeout, ensuring zombie reap on any exit path."""
-    logging.debug(f"Exec async: $ {shlex.join(cmd)}")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        if timeout is not None:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        else:
-            stdout, stderr = await proc.communicate()
-        return proc.returncode, stdout, stderr
-    finally:
-        if proc.returncode is None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except OSError:
-                pass
 
 
 def generate_wg_keys():
@@ -56,7 +27,7 @@ def generate_wg_keys():
         return None, None
 
 
-def setup_wg_interface(iface_name, private_key_str, internal_ip, listen_port=51820):
+def setup_wg_interface(iface_name: str, private_key: str, cidr: str, listen_port: int = 51820):
     """init wg interface, equivalent to wg-quick up"""
     try:
         # 1. create private key temp file
@@ -64,28 +35,28 @@ def setup_wg_interface(iface_name, private_key_str, internal_ip, listen_port=518
         # Use /dev/shm to ensure the file is only in memory
         key_path = f"/dev/shm/{iface_name}_priv"
         with open(key_path, "w") as f:
-            f.write(private_key_str + "\n")
+            f.write(private_key + "\n")
         os.chmod(key_path, 0o600)
 
         # 2. create wg interface (if already exists, ignore the error)
-        _run(["ip", "link", "add", "dev", iface_name, "type", "wireguard"], stderr=subprocess.DEVNULL)
+        _run(["ip", "link", "add", "dev", iface_name, "type", "wireguard"], check=False)
 
         # 3. bind private key and port
-        _run(["wg", "set", iface_name, "private-key", key_path, "listen-port", str(listen_port)], check=True)
+        _run(["wg", "set", iface_name, "private-key", key_path, "listen-port", str(listen_port)])
 
         # 4. set ip and bring up interface
-        _run(["ip", "address", "replace", internal_ip, "dev", iface_name], check=True)
-        _run(["ip", "link", "set", "up", "dev", iface_name], check=True)
+        _run(["ip", "address", "replace", cidr, "dev", iface_name])
+        _run(["ip", "link", "set", "up", "dev", iface_name])
 
         os.remove(key_path)
-        logging.info(f"Interface {iface_name} setup successful with IP {internal_ip}")
+        logging.info(f"Interface {iface_name} setup successful with IP {cidr}")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to setup interface {iface_name}: {e!r}")
         raise
 
 _sync_wg_peers_running = False
 
-async def sync_wg_peers(iface_name, known_nodes_dict, my_node_id, cidr_str):
+async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, network_addr: str):
     """Incrementally sync WireGuard peers. Only one instance may run at a time."""
     global _sync_wg_peers_running
     if _sync_wg_peers_running:
@@ -109,7 +80,7 @@ async def sync_wg_peers(iface_name, known_nodes_dict, my_node_id, cidr_str):
             if nid == my_node_id:
                 continue
             expected_peers.add(node.pubkey)
-            allowed_ip = f"{get_internal_ip(cidr_str, node.node_id)}/32"
+            allowed_ip = get_internal_ip(network_addr, node.node_id, cidr="host")
             cmd = ["wg", "set", iface_name, "peer", node.pubkey, "allowed-ips", allowed_ip]
             if node.endpoint:
                 cmd.extend(["endpoint", node.endpoint])

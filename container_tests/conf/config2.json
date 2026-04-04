@@ -2,7 +2,10 @@
     "me": {
         "id": 2,
         "name": "node-2",
-        "cidr": "10.123.234.0/24",
+        "cidr": "INVALID_WILL_BE_OVERWRITTEN",
+        "network": "10.123.234.0/24",
+        "gre_network": "10.124.234.0/24",
+        "vxlan_network": "10.125.234.0/24",
         "seq_num": 10,
         "private_key": "EJjkjdfbMLeXRKosb+nC0sZCfI8xyjlGDg6StIfroVM=",
         "public_key": "ldWMAMxO7xo9z0DU/u98kIK1b1fh4LDzdLKff+QV+3c=",

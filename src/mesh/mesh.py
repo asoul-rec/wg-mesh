@@ -11,7 +11,9 @@ import time
 
 from .utils import *
 from ._version import *
-from .wg import setup_wg_interface, sync_wg_peers
+from .linux_net.wg import setup_wg_interface, sync_wg_peers
+from .linux_net.gre import setup_gre_interface, sync_direct_peers
+from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
 from .crypto import encrypt_payload, decrypt_payload
 from .node import Node, load_conf, save_conf
 
@@ -77,7 +79,12 @@ class MeshController:
         while self._wg_update_pending:
             self._wg_update_pending = False
             try:
-                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.cidr)
+                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.network)
+                peer_keys = self.known_nodes.keys() - {self.me.node_id}
+                if (gre_network := self.me.gre_network):
+                    sync_direct_peers("gre-mesh", peer_keys, gre_network, self.me.network)
+                if (vxlan_network := self.me.vxlan_network):
+                    sync_vxlan_peers("vxlan-mesh", peer_keys, vxlan_network, self.me.network)
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
             except asyncio.CancelledError:
@@ -154,9 +161,9 @@ class MeshController:
             uncompressed = zstd.decompress(payload)
             payload_data = json.loads(uncompressed.decode('utf-8'))
 
-            recv_cidr = payload_data.get("cidr")
-            if recv_cidr and recv_cidr != self.me.cidr:
-                logging.warning(f"Dropping announce from {sender_ip}: mismatched CIDR ({recv_cidr} != {self.me.cidr})")
+            recv_network = payload_data.get("network")
+            if recv_network and recv_network != self.me.network:
+                logging.warning(f"Dropping announce from {sender_ip}: mismatched network ({recv_network} != {self.me.network})")
                 return
 
             recv_dict = {n['node_id']: n for n in payload_data.get("nodes", [])}
@@ -241,12 +248,12 @@ class MeshController:
         # 3. Broadcast Decision
         origin_id_name = f"<{self.known_nodes[origin_id].name}> " if origin_id in self.known_nodes else ""
         if source_needs_correction:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.cidr, origin_id)}) needs correction. "
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.network, origin_id)}) needs correction. "
                          f"Announcing merged state.")
             self.bump_my_seq()
             self.announce()
         else:
-            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.cidr, origin_id)}) is consistent. "
+            logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.network, origin_id)}) is consistent. "
                          f"Forwarding its raw broadcast.")
             self.broadcast(origin_id, seq_num, payload, exclude_ip=sender_ip)
 
@@ -268,7 +275,7 @@ class MeshController:
         self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
 
     def send_ack(self, target_ip, origin_id, seq_num, pkt_tag):
-        sender_id = get_node_id_from_ip(self.me.cidr, target_ip)
+        sender_id = get_node_id_from_ip(self.me.network, target_ip)
         if sender_id not in self.known_nodes:
             logging.error(f"Cannot send ACK, missing pubkey for immediate sender IP {target_ip} (node {sender_id})")
             return
@@ -304,7 +311,7 @@ class MeshController:
         self.bump_my_seq()
         logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
         payload_data = {
-            "cidr": self.me.cidr,
+            "network": self.me.network,
             "nodes": [node.to_dict() for node in self.known_nodes.values()]
         }
         compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
@@ -314,7 +321,7 @@ class MeshController:
         for nid, neighbor in self.known_nodes.items():
             if nid == self.me.node_id or nid == origin_id:
                 continue
-            target_ip = get_internal_ip(self.me.cidr, nid)
+            target_ip = get_internal_ip(self.me.network, nid)
             if exclude_ip and target_ip == exclude_ip:
                 continue
             task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
@@ -381,7 +388,7 @@ class MeshController:
         ack_queue = asyncio.Queue()
         self.pending_acks[task_key] = ack_queue
         try:
-            target_nid = get_node_id_from_ip(self.me.cidr, target_ip)
+            target_nid = get_node_id_from_ip(self.me.network, target_ip)
             loop = asyncio.get_running_loop()
             for attempt in range(3):
                 # Ensure the current task is still valid
@@ -434,13 +441,19 @@ async def run(config_file, dry_run):
         logging.warning("Signal handlers not supported on this platform.")
         pass
 
-    my_ip = get_internal_ip(controller.me.cidr, controller.me.node_id)
+    my_ip = get_internal_ip(controller.me.network, controller.me.node_id)
+    my_cidr = get_internal_ip(controller.me.network, controller.me.node_id, cidr="network")
 
     logging.info(f"Spinning up wg interface on {my_ip}")
     if not controller.dry_run:
-        prefix = controller.me.cidr.split('/')[-1]
-        setup_wg_interface("wg0", controller.me.private_key, f"{my_ip}/{prefix}")
+        setup_wg_interface("wg0", controller.me.private_key, my_cidr)
         controller.trigger_wg_update()
+        if (gre_network := controller.me.gre_network):
+            gre_cidr = get_internal_ip(gre_network, controller.me.node_id, cidr="network")
+            setup_gre_interface("gre-mesh", gre_cidr)
+        if (vxlan_network := controller.me.vxlan_network):
+            vxlan_cidr = get_internal_ip(vxlan_network, controller.me.node_id, cidr="network")
+            setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0")
     await asyncio.sleep(1)
 
     logging.info(f"Binding UDP endpoint on [{my_ip}:{controller.MESH_UDP_LISTEN_PORT}]")
