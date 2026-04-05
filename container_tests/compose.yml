@@ -6,6 +6,8 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.vrf.strict_mode=1
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config1.json:/app/config.json
@@ -19,6 +21,8 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.vrf.strict_mode=1
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config2.json:/app/config.json
@@ -32,6 +36,8 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.vrf.strict_mode=1
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config3.json:/app/config.json
@@ -45,6 +51,8 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.vrf.strict_mode=1
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config4.json:/app/config.json
@@ -58,6 +66,8 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.vrf.strict_mode=1
     volumes:
       - ../src:/app/src:ro
       - ./runtime_conf/config5.json:/app/config.json

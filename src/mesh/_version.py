@@ -5,5 +5,5 @@ __all__ = [
     "VERSION",
 ]
 
-VERSION_STR = "0.0.3.1"
+VERSION_STR = "0.0.3.2"
 VERSION = version_to_int(VERSION_STR)

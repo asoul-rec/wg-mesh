@@ -13,4 +13,4 @@ logging_level = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}.get(args
 logging.basicConfig(level=logging_level, format='%(asctime)s [%(levelname).1s] [%(name)s] %(message)s')
 
 if __name__ == "__main__":
-    asyncio.run(mesh.run(args.config, args.dry_run))
+    asyncio.run(mesh.MeshController(args.config, args.dry_run).run())

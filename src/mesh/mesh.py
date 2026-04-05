@@ -14,6 +14,7 @@ from ._version import *
 from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
+from .linux_net.seg6 import setup_seg6_csid
 from .crypto import encrypt_payload, decrypt_payload
 from .node import Node, load_conf, save_conf
 
@@ -66,6 +67,66 @@ class MeshController:
     def save_conf(self):
         save_conf(self.config_file, self.me, self.known_nodes)
 
+    async def run(self):
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+        def handle_stop():
+            logging.warning("Received shutdown signal, initiating graceful exit...")
+            stop_event.set()
+
+        try:
+            loop.add_signal_handler(signal.SIGTERM, handle_stop)
+            loop.add_signal_handler(signal.SIGINT, handle_stop)
+        except NotImplementedError:
+            logging.warning("Signal handlers not supported on this platform.")
+            pass
+
+        my_ip = get_internal_ip(self.me.network, self.me.node_id)
+        my_cidr = get_internal_ip(self.me.network, self.me.node_id, cidr="network")
+
+        logging.info(f"Spinning up wg interface on {my_ip}")
+        if not self.dry_run:
+            setup_wg_interface("wg0", self.me.private_key, my_cidr, self.me.node_id, csid=self.me.csid)
+            self.trigger_wg_update()
+            if self.me.csid is not None:
+                setup_seg6_csid(self.me.node_id, "wg0", csid=self.me.csid, vrf_table=100, tunnel6_ifname="tun6-mesh")
+            if (gre_network := self.me.gre_network):
+                gre_cidr = get_internal_ip(gre_network, self.me.node_id, cidr="network")
+                setup_gre_interface("gre-mesh", gre_cidr)
+            if (vxlan_network := self.me.vxlan_network):
+                vxlan_cidr = get_internal_ip(vxlan_network, self.me.node_id, cidr="network")
+                setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0")
+        await asyncio.sleep(1)
+
+        logging.info(f"Binding UDP endpoint on [{my_ip}:{self.MESH_UDP_LISTEN_PORT}]")
+        try:
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: MeshProtocol(self),
+                local_addr=(my_ip, self.MESH_UDP_LISTEN_PORT)
+            )
+        except Exception as e:
+            logging.error(f"Failed to bind UDP endpoint [{my_ip}:{self.MESH_UDP_LISTEN_PORT}]: {e!r}")
+            return
+
+        try:
+            self.bump_my_seq()
+            self.announce()
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            self._online_monitor_task = asyncio.create_task(self._online_monitor_loop())
+            await stop_event.wait()
+        finally:
+            if self._keepalive_task:
+                self._keepalive_task.cancel()
+            if self._online_monitor_task:
+                self._online_monitor_task.cancel()
+            if self._wg_task:
+                self._wg_task.cancel()
+            for task in self._background_tasks:
+                task.cancel()
+            transport.close()
+            logging.info("Graceful shutdown complete.")
+
+
     def trigger_wg_update(self):
         if self.dry_run:
             logging.info(f"[DRY-RUN] Would update WireGuard")
@@ -79,7 +140,7 @@ class MeshController:
         while self._wg_update_pending:
             self._wg_update_pending = False
             try:
-                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.network)
+                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.network, csid=self.me.csid)
                 peer_keys = self.known_nodes.keys() - {self.me.node_id}
                 if (gre_network := self.me.gre_network):
                     sync_direct_peers("gre-mesh", peer_keys, gre_network, self.me.network)
@@ -423,63 +484,3 @@ class MeshController:
             logging.info(f"Failed to send packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
         finally:
             self.pending_acks.pop(task_key, None)
-
-
-async def run(config_file, dry_run):
-    controller = MeshController(config_file=config_file, dry_run=dry_run)
-    loop = asyncio.get_running_loop()
-
-    stop_event = asyncio.Event()
-    def handle_stop():
-        logging.warning("Received shutdown signal, initiating graceful exit...")
-        stop_event.set()
-
-    try:
-        loop.add_signal_handler(signal.SIGTERM, handle_stop)
-        loop.add_signal_handler(signal.SIGINT, handle_stop)
-    except NotImplementedError:
-        logging.warning("Signal handlers not supported on this platform.")
-        pass
-
-    my_ip = get_internal_ip(controller.me.network, controller.me.node_id)
-    my_cidr = get_internal_ip(controller.me.network, controller.me.node_id, cidr="network")
-
-    logging.info(f"Spinning up wg interface on {my_ip}")
-    if not controller.dry_run:
-        setup_wg_interface("wg0", controller.me.private_key, my_cidr)
-        controller.trigger_wg_update()
-        if (gre_network := controller.me.gre_network):
-            gre_cidr = get_internal_ip(gre_network, controller.me.node_id, cidr="network")
-            setup_gre_interface("gre-mesh", gre_cidr)
-        if (vxlan_network := controller.me.vxlan_network):
-            vxlan_cidr = get_internal_ip(vxlan_network, controller.me.node_id, cidr="network")
-            setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0")
-    await asyncio.sleep(1)
-
-    logging.info(f"Binding UDP endpoint on [{my_ip}:{controller.MESH_UDP_LISTEN_PORT}]")
-    try:
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: MeshProtocol(controller),
-            local_addr=(my_ip, controller.MESH_UDP_LISTEN_PORT)
-        )
-    except Exception as e:
-        logging.error(f"Failed to bind UDP endpoint [{my_ip}:{controller.MESH_UDP_LISTEN_PORT}]: {e!r}")
-        return
-
-    try:
-        controller.bump_my_seq()
-        controller.announce()
-        controller._keepalive_task = asyncio.create_task(controller._keepalive_loop())
-        controller._online_monitor_task = asyncio.create_task(controller._online_monitor_loop())
-        await stop_event.wait()
-    finally:
-        if controller._keepalive_task:
-            controller._keepalive_task.cancel()
-        if controller._online_monitor_task:
-            controller._online_monitor_task.cancel()
-        if controller._wg_task:
-            controller._wg_task.cancel()
-        for task in controller._background_tasks:
-            task.cancel()
-        transport.close()
-        logging.info("Graceful shutdown complete.")

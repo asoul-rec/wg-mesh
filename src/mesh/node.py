@@ -4,8 +4,10 @@ import logging
 import collections
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .linux_net.wg import generate_wg_keys
+from .utils import SRv6CSID
 
 
 @dataclass
@@ -63,6 +65,7 @@ class LocalNode:
     network: str
     gre_network: str = ""
     vxlan_network: str = ""
+    csid: Optional[SRv6CSID] = None
     _initialized = False
 
     def __post_init__(self):
@@ -85,6 +88,8 @@ class LocalNode:
             d["gre_network"] = self.gre_network
         if self.vxlan_network:
             d["vxlan_network"] = self.vxlan_network
+        if self.csid is not None:
+            d["srv6"] = {"flavor": "next-csid", **self.csid.to_dict()}
         return d
 
 
@@ -104,6 +109,7 @@ def load_conf(config_file):
     network_str = me_cfg.get("network", me_cfg.get("cidr", "10.123.234.0/24"))
     gre_network_str = me_cfg.get("gre_network", "")
     vxlan_network_str = me_cfg.get("vxlan_network", "")
+    srv6_settings = me_cfg.get("srv6")
     private_key = me_cfg.get("private_key", "")
     my_pubkey = me_cfg.get("public_key", "")
 
@@ -112,6 +118,15 @@ def load_conf(config_file):
         private_key, my_pubkey = generate_wg_keys()
         if not private_key or not my_pubkey:
             raise ValueError("Failed to generate keys")
+
+    csid = None
+    if srv6_settings is not None:
+        srv6_settings = srv6_settings.copy()
+        flavor = srv6_settings.pop("flavor", "")
+        if flavor == "next-csid":
+            csid = SRv6CSID(**srv6_settings)
+        else:
+            raise ValueError(f"Unknown SRv6 flavor: {flavor}")
 
     node_me = Node(
         my_id, me_cfg.get("name", f"node-{my_id}"), my_pubkey,
@@ -124,7 +139,8 @@ def load_conf(config_file):
         private_key=private_key,
         network=network_str,
         gre_network=gre_network_str,
-        vxlan_network=vxlan_network_str
+        vxlan_network=vxlan_network_str,
+        csid=csid
     )
 
     known_nodes = {}
@@ -153,7 +169,7 @@ def save_conf(config_file, me, known_nodes):
         # reorder keys
         for key in [
             "id", "name", "private_key", "public_key", "endpoint", "network",
-            "gre_network", "vxlan_network", "seq_num", "timestamp"
+            "srv6", "gre_network", "vxlan_network", "seq_num", "timestamp"
         ]:
             if key in me_dict:
                 me_dict[key] = me_dict.pop(key)
