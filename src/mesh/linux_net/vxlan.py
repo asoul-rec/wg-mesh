@@ -6,11 +6,11 @@ from ..utils import get_internal_ip
 
 
 def setup_vxlan_interface(
-    iface_name, cidr, underlay_iface, vxlan_id=1, dstport=4789
+    iface_name, cidr, underlay_iface, underlay_addr, vxlan_id=1, dstport=4789
 ):
     try:
         run(["ip", "link", "add", iface_name, "type", "vxlan", "id", str(vxlan_id),
-              "dstport", str(dstport), "dev", underlay_iface])
+             "dstport", str(dstport), "local", underlay_addr, "dev", underlay_iface])
         run(["ip", "link", "set", iface_name, "up"])
         run(["ip", "addr", "add", cidr, "dev", iface_name])
     except CalledProcessError as e:

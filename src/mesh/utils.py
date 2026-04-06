@@ -19,9 +19,8 @@ def int_to_version(v_int):
     return f"{(v_int >> 24) & 255}.{(v_int >> 16) & 255}.{(v_int >> 8) & 255}.{v_int & 255}"
 
 
-def get_internal_ip(network_addr, node_id, *, version: Literal[4, 6] = 4, cidr: Optional[Literal["network", "host"]]=None):
-    network_class = ipaddress.IPv4Network if version == 4 else ipaddress.IPv6Network
-    network = network_class(network_addr, strict=True)
+def get_internal_ip(network_addr, node_id, *, cidr: Optional[Literal["network", "host"]]=None):
+    network = ipaddress.ip_network(network_addr, strict=True)
     if cidr is None:
         return str(network[node_id])
     elif cidr == "network":
@@ -33,8 +32,8 @@ def get_internal_ip(network_addr, node_id, *, version: Literal[4, 6] = 4, cidr: 
 
 
 def get_node_id_from_ip(network_addr, ip_str):
-    network = ipaddress.IPv4Network(network_addr, strict=True)
-    ip = ipaddress.IPv4Address(ip_str)
+    network = ipaddress.ip_network(network_addr, strict=True)
+    ip = ipaddress.ip_address(ip_str)
     return int(ip) - int(network.network_address)
 
 class SRv6CSID:

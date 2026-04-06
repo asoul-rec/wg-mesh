@@ -14,7 +14,7 @@ from ._version import *
 from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
-from .linux_net.seg6 import setup_seg6_csid
+from .linux_net.seg6 import setup_seg6_csid, sync_seg6_routes
 from .crypto import encrypt_payload, decrypt_payload
 from .node import Node, load_conf, save_conf
 
@@ -95,7 +95,7 @@ class MeshController:
                 setup_gre_interface("gre-mesh", gre_cidr)
             if (vxlan_network := self.me.vxlan_network):
                 vxlan_cidr = get_internal_ip(vxlan_network, self.me.node_id, cidr="network")
-                setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0")
+                setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0", my_ip)
         await asyncio.sleep(1)
 
         logging.info(f"Binding UDP endpoint on [{my_ip}:{self.MESH_UDP_LISTEN_PORT}]")
@@ -146,6 +146,10 @@ class MeshController:
                     sync_direct_peers("gre-mesh", peer_keys, gre_network, self.me.network)
                 if (vxlan_network := self.me.vxlan_network):
                     sync_vxlan_peers("vxlan-mesh", peer_keys, vxlan_network, self.me.network)
+                if (csid := self.me.csid):
+                    # Direct connection as default srv6 path
+                    route = {i: [i] for i in peer_keys}
+                    sync_seg6_routes(csid, route)
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
             except asyncio.CancelledError:

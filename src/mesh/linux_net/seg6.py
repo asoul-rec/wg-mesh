@@ -1,10 +1,11 @@
+import ipaddress
 import logging
 from subprocess import CalledProcessError
 from typing import Optional, Union, Literal
 
 from .proc import run, log_called_process_error
 from .vrf import VRFTable
-from ..utils import SRv6CSID
+from ..utils import SRv6CSID, get_internal_ip
 
 
 def setup_seg6_csid(
@@ -42,14 +43,36 @@ def setup_seg6_csid(
         # Masquerade forwarded traffic from wg and back to wg to avoid dropping
         if masquerade_iface:
             nft_rule = """
-            table ip6 nat {{
-                chain srv6masq {{
-                    type nat hook postrouting priority srcnat; policy accept;
-                    iif "{iface}" oif "{iface}" ip6 saddr {lb_addr} ip6 daddr {lb_addr} masquerade
+            table ip6 srv6 {{
+                map srv6_paths {{
+                    type ipv6_addr : ipv6_addr
+                }}
+                chain raw_prerouting {{
+                    type filter hook prerouting priority raw; policy accept;
+                    iif "{iface}" ip6 daddr {node_addr} ip6 saddr set ip6 saddr & {node_mask} | {lb_addr} ip6 daddr set {local_addr} accept
+                    iif "{iface}" ip6 saddr {lb_net} ip6 daddr {node_net} notrack accept
+                    iif "{iface}" ip6 saddr {lb_net} counter drop
+                }}
+                chain mangle_output {{
+                    type filter hook output priority mangle; policy accept;
+                    oif "{iface}" ip6 daddr {lb_net} ip6 daddr set ip6 daddr map @srv6_paths accept
+                    oif "{iface}" ip6 daddr {lb_net} counter accept
+                }}
+                chain mangle_postrouting {{
+                    type filter hook postrouting priority mangle; policy accept;
+                    oif "{iface}" ip6 saddr {lb_net} ip6 daddr {lb_net} ip6 saddr set ip6 saddr & {node_mask} | {node_addr}
                 }}
             }}
-            """.format(iface=masquerade_iface, lb_addr=csid.locator_block_address)
-            logging.debug(f"Creating nft srv6masq chain: {nft_rule}")
+            """.format(
+                iface=masquerade_iface,
+                lb_net=csid.locator_block_address,
+                lb_addr=get_internal_ip(csid.locator_block_address, 0),
+                node_addr=csid.get_node_function_address(node_id, cidr=None),
+                node_net=csid.get_node_function_address(node_id, cidr="network"),
+                node_mask=ipaddress.ip_network(csid.get_node_function_address(node_id, cidr="network")).hostmask,
+                local_addr=get_internal_ip(csid.locator_block_address, node_id)
+            )
+            logging.debug(f"Creating nft srv6 table: {nft_rule}")
             run(["nft", "-f", "-"], input=nft_rule.encode())
         run(["ip", "route", "add", "local", csid.get_node_function_address(node_id, cidr="network"), "encap", "seg6local",
              "action", "End", "flavors", "next-csid", "lblen", str(csid.lblen), "nflen", str(csid.nflen), "dev", "lo"])
@@ -77,3 +100,23 @@ def setup_seg6_csid(
         logging.warning(f"Failed to setup SRv6 CSID: {e!r}")
     else:
         logging.info(f"SRv6 CSID setup successfully")
+
+def sync_seg6_routes(csid: SRv6CSID, route_table: dict[int, list[int]], flush: bool = False):
+    nft_commands = ["flush set ip6 srv6 srv6_paths"] if flush else []
+    for nid, hops in route_table.items():
+        key = get_internal_ip(csid.locator_block_address, nid)
+        value = csid.get_srv6_address(hops)
+        nft_commands.append(f"destroy element ip6 srv6 srv6_paths {{ {key} }}")
+        nft_commands.append(f"add element ip6 srv6 srv6_paths {{ {key} : {value} }}")
+    if not nft_commands:
+        return
+    nft_commands_str = "\n".join(nft_commands)
+    logging.debug(f"Updating nftables map:\n{nft_commands_str}")
+    try:
+        run(["nft", "-f", "-"], input=nft_commands_str.encode())
+    except CalledProcessError as e:
+        log_called_process_error(logging.warning, e)
+    except Exception as e:
+        logging.warning(f"Failed to sync SRv6 routes: {e!r}")
+    else:
+        logging.info(f"SRv6 routes synced successfully ({len(route_table)} routes updated)")

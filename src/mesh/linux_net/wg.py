@@ -52,11 +52,8 @@ def setup_wg_interface(iface_name: str, private_key: str, cidr: str, node_id: in
         run(["ip", "link", "set", "up", "dev", iface_name])
         if csid is not None:
             run(["ip", "route", "add", csid.locator_block_address, "dev", iface_name])
-            # Assign a single address like fd23::23/128 for debugging
-            csid_node_net = csid.get_node_function_address(node_id, cidr="network")
-            csid_debug_host = get_internal_ip(csid_node_net, node_id, version=6, cidr="host")
-            run(["ip", "address", "add", csid_debug_host, "dev", iface_name])
-
+            csid_host = get_internal_ip(csid.locator_block_address, node_id, cidr="host")
+            run(["ip", "address", "add", csid_host, "dev", iface_name])
         logging.info(f"Interface {iface_name} setup successful with IP {cidr}")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to setup wireguard {iface_name}. {e} stdout: {e.output.decode()} stderr: {e.stderr.decode()}")
