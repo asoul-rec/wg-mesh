@@ -5,7 +5,6 @@ import compression.zstd as zstd
 import heapq
 import json
 import logging
-import math
 import random
 import signal
 import struct
@@ -58,6 +57,7 @@ class MeshController:
         self._keepalive_task = None
         self._inbound_event = asyncio.Event()
         self._online_monitor_task = None
+        self._routing_supervisor_event = asyncio.Event()
         self._routing_supervisor_task = None
         # active broadcast at start
         self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
@@ -119,7 +119,8 @@ class MeshController:
             self.announce()
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
             self._online_monitor_task = asyncio.create_task(self._online_monitor_loop())
-            self._routing_supervisor_task = asyncio.create_task(self._routing_supervisor_loop())
+            if self.me.csid is not None:
+                self._routing_supervisor_task = asyncio.create_task(self._routing_supervisor_loop())
             await stop_event.wait()
         finally:
             if self._keepalive_task:
@@ -156,9 +157,7 @@ class MeshController:
                 if (vxlan_network := self.me.vxlan_network):
                     sync_vxlan_peers("vxlan-mesh", peer_keys, vxlan_network, self.me.network)
                 if (csid := self.me.csid):
-                    # Direct connection as default srv6 path
-                    route = {i: [i] for i in peer_keys}
-                    sync_seg6_routes(csid, route)
+                    self._routing_supervisor_event.set()
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
             except asyncio.CancelledError:
@@ -178,8 +177,8 @@ class MeshController:
 
         pkt_version, = struct.unpack('!I', data[:4])
         if pkt_version >> 8 != VERSION >> 8:
-            logging.error(f"Cannot process package with incompatible version {int_to_version(pkt_version)}, "
-                          f"current version {VERSION_STR}")
+            logging.warning(f"Cannot process package with incompatible version {int_to_version(pkt_version)}, "
+                            f"current version {VERSION_STR}")
             return
 
         try:
@@ -206,6 +205,11 @@ class MeshController:
                 self.process_announce(origin_id, seq_num, pkt_tag, payload_data, sender_ip)
         elif pkt_type == 2:
             self.process_ack(origin_id, seq_num, sender_ip, pkt_tag)
+        elif pkt_type == 3:
+            if origin_id == self.me.node_id:
+                logging.warning(f"{sender_ip} sent my route cost back to me, dropping")
+            else:
+                self.process_route_cost(origin_id, seq_num, pkt_tag, payload_data, sender_ip)
 
     def process_announce(self, origin_id, seq_num, pkt_tag, payload, sender_ip):
         logging.debug(f"Received announce from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
@@ -222,7 +226,7 @@ class MeshController:
             if nid not in self.known_nodes:
                 return 1  # Unknown node implies sender's knowledge is newer
             l_seq = self.known_nodes[nid].seq_num
-            return (r_seq - l_seq + (1 << 31)) % (1 << 32) - (1 << 31)
+            return wrapping_sub(r_seq, l_seq)
 
         # 1. Flood Control: Drop replayed or slightly older packets (-STALE_TOLERANCE, 0].
         # However, we allow extremely old packets to pass (they represent node amnesia recovery).
@@ -234,13 +238,11 @@ class MeshController:
         try:
             uncompressed = zstd.decompress(payload)
             payload_data = json.loads(uncompressed.decode('utf-8'))
-
-            recv_network = payload_data.get("network")
+            recv_network = payload_data["network"]
             if recv_network and recv_network != self.me.network:
                 logging.warning(f"Dropping announce from {sender_ip}: mismatched network ({recv_network} != {self.me.network})")
                 return
-
-            recv_dict = {n['node_id']: n for n in payload_data.get("nodes", [])}
+            recv_dict = {n['node_id']: n for n in payload_data["nodes"]}
         except Exception as e:
             logging.error(f"Payload parse error from {sender_ip}: {e!r}")
             return
@@ -330,7 +332,30 @@ class MeshController:
         else:
             logging.info(f"Source {origin_id_name}({get_internal_ip(self.me.network, origin_id)}) is consistent. "
                          f"Forwarding its raw broadcast.")
-            self.broadcast(origin_id, seq_num, payload, exclude_ip=sender_ip)
+            self.broadcast(1, origin_id, seq_num, payload, exclude_ip=sender_ip)
+
+    def process_route_cost(self, origin_id, seq_num, pkt_tag, payload, sender_ip):
+        logging.debug(f"Received route cost from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
+        if origin_id not in self.known_nodes:
+            self.announce()
+            self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
+            return
+            
+        local_n = self.known_nodes[origin_id]
+        if wrapping_sub(seq_num, local_n.seq_num) <= 0:
+            logging.debug(f"Dropping stale route cost update")
+            self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
+            return
+        try:
+            route_dict = json.loads(payload.decode('utf-8'))
+            self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
+        except Exception as e:  # do not send ACK for bad packets
+            logging.error(f"Route cost payload parse error from {sender_ip}: {e!r}")
+            return
+        local_n.route_cost = route_dict
+        local_n.seq_num = seq_num
+        self.save_conf()
+        self.broadcast(3, origin_id, seq_num, payload, exclude_ip=sender_ip)
 
     def process_ack(self, origin_id, seq_num, sender_ip, pkt_tag):
         loop = asyncio.get_running_loop()
@@ -383,30 +408,40 @@ class MeshController:
             await asyncio.sleep(sleep_time)
         # Do broadcast
         self._send_history.append(loop.time())
-        curr_time = loop.time()
-        self.me.route_cost = {
-            str(nid): neighbor.get_link_cost(curr_time)
-            for nid, neighbor in self.known_nodes.items()
-            if nid != self.me.node_id
-        }
-        logging.debug(f"Route cost {self.me.route_cost}")
+        self.calculate_route_cost(loop.time())
         self.bump_my_seq()
         logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
         payload_data = {
             "network": self.me.network,
             "nodes": [node.to_dict() for node in self.known_nodes.values()]
         }
-        compressed_payload = zstd.compress(json.dumps(payload_data).encode('utf-8'))
-        self.broadcast(self.me.node_id, self.me.seq_num, compressed_payload)
+        compressed_payload = zstd.compress(json.dumps(payload_data, separators=(',', ':')).encode('utf-8'))
+        self.broadcast(1, self.me.node_id, self.me.seq_num, compressed_payload)
 
-    def broadcast(self, origin_id, seq_num, compressed_payload, exclude_ip=None):
+    def calculate_route_cost(self, curr_time):
+        if self.me.csid is not None:
+            self.me.route_cost = {
+                str(nid): neighbor.get_link_cost(curr_time)
+                for nid, neighbor in self.known_nodes.items()
+                if nid != self.me.node_id
+            }
+            logging.debug(f"Calculated route cost: {self.me.route_cost}")
+
+    def announce_route_cost(self):
+        self.calculate_route_cost(asyncio.get_running_loop().time())
+        self.bump_my_seq()
+        logging.debug(f"Broadcasting route cost, seq_num={self.me.seq_num}")
+        payload = json.dumps(self.me.route_cost, separators=(',', ':')).encode('utf-8')
+        self.broadcast(3, self.me.node_id, self.me.seq_num, payload)
+
+    def broadcast(self, pkt_type, origin_id, seq_num, payload, *, exclude_ip=None):
         for nid, neighbor in self.known_nodes.items():
             if nid == self.me.node_id or nid == origin_id:
                 continue
             target_ip = get_internal_ip(self.me.network, nid)
             if exclude_ip and target_ip == exclude_ip:
                 continue
-            task = asyncio.create_task(self.reliable_send(target_ip, 1, origin_id, seq_num, compressed_payload, neighbor.pubkey))
+            task = asyncio.create_task(self.reliable_send(target_ip, pkt_type, origin_id, seq_num, payload, neighbor.pubkey))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
         self._keepalive_event.set()
@@ -460,34 +495,40 @@ class MeshController:
     async def _routing_supervisor_loop(self):
         """Routing supervisor: periodically computes shortest paths and updates SRv6 routes."""
         logging.info(f"Routing supervisor loop started.")
+        NO_ROUTE = 3000
+        me_id = self.me.node_id
         try:
             while True:
-                await asyncio.sleep(60)
-                if not self.me.csid:
-                    continue
-
-                distances = {nid: math.inf for nid in self.known_nodes}
-                distances[self.me.node_id] = 0
-                predecessors = {nid: None for nid in self.known_nodes}
-                pq = [(0, self.me.node_id)]
+                self._routing_supervisor_event.clear()
+                try:
+                    await asyncio.wait_for(self._routing_supervisor_event.wait(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    pass
+                # Compute route_costs and broadcast to neighbors before updating routes
+                self.announce_route_cost()
+                link_state = {
+                    nid: {
+                        neighbor_nid: cost
+                        for neighbor_str, cost in node.route_cost.items()
+                        if (neighbor_nid := int(neighbor_str)) in self.known_nodes
+                    }
+                    for nid, node in self.known_nodes.items()
+                }
+                distances = {nid: NO_ROUTE for nid in link_state}
+                distances[me_id] = 0
+                predecessors = {nid: None for nid in link_state}
+                pq = [(0, me_id)]
                 visited = set()
                 while pq:
                     current_dist, current_node = heapq.heappop(pq)
                     if current_node in visited:
                         continue
                     visited.add(current_node)
-                    if current_node not in self.known_nodes:
+                    if current_node not in link_state:
                         continue
 
-                    route_costs = self.known_nodes[current_node].route_cost
-                    for neighbor_str, edge_weight in route_costs.items():
-                        try:
-                            neighbor = int(neighbor_str)
-                        except ValueError:
-                            continue
-                        if neighbor not in self.known_nodes:
-                            continue
-                        edge_weight = max(1, edge_weight)
+                    for neighbor, edge_weight in link_state[current_node].items():
+                        edge_weight = 1 if edge_weight < 1 else edge_weight
                         new_dist = current_dist + edge_weight
                         if new_dist < distances[neighbor]:
                             distances[neighbor] = new_dist
@@ -495,16 +536,15 @@ class MeshController:
                             heapq.heappush(pq, (new_dist, neighbor))
 
                 route_table = {}
-                for target_nid in self.known_nodes:
-                    if target_nid == self.me.node_id or math.isinf(distances[target_nid]):
+                for target_nid in link_state:
+                    if target_nid == me_id or distances[target_nid] == NO_ROUTE:
                         continue
                     path = []
                     curr = target_nid
-                    while curr != self.me.node_id:
+                    while curr != me_id:
                         path.append(curr)
                         curr = predecessors[curr]
-                    path.reverse()
-                    route_table[target_nid] = path
+                    route_table[target_nid] = path[::-1]
                 if route_table:
                     logging.debug(f"Computed SRv6 routing table: {route_table}")
                     try:

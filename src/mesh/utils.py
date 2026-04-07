@@ -2,6 +2,7 @@ import ipaddress
 from typing import Optional, Literal
 
 __all__ = [
+    "wrapping_sub",
     "version_to_int",
     "int_to_version",
     "get_internal_ip",
@@ -9,6 +10,16 @@ __all__ = [
     "SRv6CSID",
 ]
 
+def wrapping_sub(a: int, b: int, max_val: int = 1 << 32) -> int:
+    """
+    Compute the wrapping difference between two integers.
+    
+    :param a: The first integer.
+    :param b: The second integer.
+    :param max_val: The maximum value.
+    :return: The wrapping difference between a and b.
+    """
+    return (a - b + (max_val >> 1)) % max_val - (max_val >> 1)
 
 def version_to_int(v_str):
     parts = [int(x) for x in v_str.split('.')]
