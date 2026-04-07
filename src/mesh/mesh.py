@@ -2,8 +2,10 @@ import argparse
 import asyncio
 import collections
 import compression.zstd as zstd
+import heapq
 import json
 import logging
+import math
 import random
 import signal
 import struct
@@ -56,6 +58,7 @@ class MeshController:
         self._keepalive_task = None
         self._inbound_event = asyncio.Event()
         self._online_monitor_task = None
+        self._routing_supervisor_task = None
         # active broadcast at start
         self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
         self._offline = True
@@ -116,12 +119,15 @@ class MeshController:
             self.announce()
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
             self._online_monitor_task = asyncio.create_task(self._online_monitor_loop())
+            self._routing_supervisor_task = asyncio.create_task(self._routing_supervisor_loop())
             await stop_event.wait()
         finally:
             if self._keepalive_task:
                 self._keepalive_task.cancel()
             if self._online_monitor_task:
                 self._online_monitor_task.cancel()
+            if self._routing_supervisor_task:
+                self._routing_supervisor_task.cancel()
             if self._wg_task:
                 self._wg_task.cancel()
             for task in self._background_tasks:
@@ -450,6 +456,66 @@ class MeshController:
                         self._keepalive_event.set() # Wake up keepalive to enforce aggressive broadcast interval
         finally:
             logging.info(f"Online status monitor terminated.")
+
+    async def _routing_supervisor_loop(self):
+        """Routing supervisor: periodically computes shortest paths and updates SRv6 routes."""
+        logging.info(f"Routing supervisor loop started.")
+        try:
+            while True:
+                await asyncio.sleep(60)
+                if not self.me.csid:
+                    continue
+
+                distances = {nid: math.inf for nid in self.known_nodes}
+                distances[self.me.node_id] = 0
+                predecessors = {nid: None for nid in self.known_nodes}
+                pq = [(0, self.me.node_id)]
+                visited = set()
+                while pq:
+                    current_dist, current_node = heapq.heappop(pq)
+                    if current_node in visited:
+                        continue
+                    visited.add(current_node)
+                    if current_node not in self.known_nodes:
+                        continue
+
+                    route_costs = self.known_nodes[current_node].route_cost
+                    for neighbor_str, edge_weight in route_costs.items():
+                        try:
+                            neighbor = int(neighbor_str)
+                        except ValueError:
+                            continue
+                        if neighbor not in self.known_nodes:
+                            continue
+                        edge_weight = max(1, edge_weight)
+                        new_dist = current_dist + edge_weight
+                        if new_dist < distances[neighbor]:
+                            distances[neighbor] = new_dist
+                            predecessors[neighbor] = current_node
+                            heapq.heappush(pq, (new_dist, neighbor))
+
+                route_table = {}
+                for target_nid in self.known_nodes:
+                    if target_nid == self.me.node_id or math.isinf(distances[target_nid]):
+                        continue
+                    path = []
+                    curr = target_nid
+                    while curr != self.me.node_id:
+                        path.append(curr)
+                        curr = predecessors[curr]
+                    path.reverse()
+                    route_table[target_nid] = path
+                if route_table:
+                    logging.debug(f"Computed SRv6 routing table: {route_table}")
+                    try:
+                        sync_seg6_routes(self.me.csid, route_table, flush=False)
+                    except Exception as e:
+                        logging.error(f"Failed to sync SRv6 routes: {e!r}")
+        except Exception as e:
+            logging.warning(f"Routing supervisor loop failed: {e!r}")
+            raise
+        finally:
+            logging.info(f"Routing supervisor loop terminated.")
 
     async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
         """
