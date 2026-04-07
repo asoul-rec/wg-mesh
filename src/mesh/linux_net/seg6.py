@@ -9,7 +9,7 @@ from ..utils import SRv6CSID, get_internal_ip
 
 
 def setup_seg6_csid(
-    node_id: int, masquerade_iface: str = "", *,
+    node_id: int, ifname: str, *,
     csid: SRv6CSID,
     vrf_table: Union[VRFTable, int] = -1,
     tunnel6_ifname: Optional[str] = None,
@@ -23,7 +23,7 @@ def setup_seg6_csid(
     traffic into a specific VRF or IPv6 tunnel interface.
 
     :param node_id: The ID of the current node to embed into the local Node Function address.
-    :param masquerade_iface: An interface to masquerade outgoing SRv6 traffic via nftables.
+    :param ifname: An interface to masquerade outgoing SRv6 traffic via nftables.
     :param csid: The SRv6 CSID geometry object containing the locator block and nflen.
     :param vrf_table: The VRF routing table to bind decapsulated inner payloads to. Disable VRF if negative (default).
     :param tunnel6_ifname: Optional interface name to create an external (collect metadata mode)
@@ -41,43 +41,42 @@ def setup_seg6_csid(
     # Do setup
     try:
         # Masquerade forwarded traffic from wg and back to wg to avoid dropping
-        if masquerade_iface:
-            nft_rule = """
-            table ip6 srv6 {{
-                map srv6_paths {{
-                    type ipv6_addr : ipv6_addr
-                }}
-                chain raw_prerouting {{
-                    type filter hook prerouting priority raw; policy accept;
-                    iif "{iface}" ip6 daddr {node_addr} ip6 saddr set ip6 saddr & {node_mask} | {lb_addr} ip6 daddr set {local_addr} accept
-                    iif "{iface}" ip6 saddr {lb_net} ip6 daddr {node_net} notrack accept
-                    iif "{iface}" ip6 saddr {lb_net} counter drop
-                }}
-                chain forward {{
-                    type filter hook forward priority filter; policy accept;
-                    ip6 saddr {lb_net} counter
-                }}
-                chain mangle_output {{
-                    type filter hook output priority mangle; policy accept;
-                    oif "{iface}" ip6 daddr {lb_net} ip6 daddr set ip6 daddr map @srv6_paths accept
-                    oif "{iface}" ip6 daddr {lb_net} counter accept
-                }}
-                chain mangle_postrouting {{
-                    type filter hook postrouting priority mangle; policy accept;
-                    oif "{iface}" ip6 saddr {lb_net} ip6 daddr {lb_net} ip6 saddr set ip6 saddr & {node_mask} | {node_addr}
-                }}
+        nft_rule = """
+        table ip6 srv6 {{
+            map srv6_paths {{
+                type ipv6_addr : ipv6_addr
             }}
-            """.format(
-                iface=masquerade_iface,
-                lb_net=csid.locator_block_address,
-                lb_addr=get_internal_ip(csid.locator_block_address, 0),
-                node_addr=csid.get_node_function_address(node_id, cidr=None),
-                node_net=csid.get_node_function_address(node_id, cidr="network"),
-                node_mask=ipaddress.ip_network(csid.get_node_function_address(node_id, cidr="network")).hostmask,
-                local_addr=get_internal_ip(csid.locator_block_address, node_id)
-            )
-            logging.debug(f"Creating nft srv6 table: {nft_rule}")
-            run(["nft", "-f", "-"], input=nft_rule.encode())
+            chain raw_prerouting {{
+                type filter hook prerouting priority raw; policy accept;
+                iif "{ifname}" ip6 daddr {node_addr} ip6 saddr set ip6 saddr & {node_mask} | {lb_addr} ip6 daddr set {local_addr} accept
+                iif "{ifname}" ip6 saddr {lb_net} ip6 daddr {node_net} notrack accept
+                iif "{ifname}" ip6 saddr {lb_net} counter drop
+            }}
+            chain forward {{
+                type filter hook forward priority filter; policy accept;
+                ip6 saddr {lb_net} counter
+            }}
+            chain mangle_output {{
+                type filter hook output priority mangle; policy accept;
+                oif "{ifname}" ip6 daddr {lb_net} ip6 daddr set ip6 daddr map @srv6_paths accept
+                oif "{ifname}" ip6 daddr {lb_net} counter accept
+            }}
+            chain mangle_postrouting {{
+                type filter hook postrouting priority mangle; policy accept;
+                oif "{ifname}" ip6 saddr {lb_net} ip6 daddr {lb_net} ip6 saddr set ip6 saddr & {node_mask} | {node_addr}
+            }}
+        }}
+        """.format(
+            ifname=ifname,
+            lb_net=csid.locator_block_address,
+            lb_addr=get_internal_ip(csid.locator_block_address, 0),
+            node_addr=csid.get_node_function_address(node_id, cidr=None),
+            node_net=csid.get_node_function_address(node_id, cidr="network"),
+            node_mask=ipaddress.ip_network(csid.get_node_function_address(node_id, cidr="network")).hostmask,
+            local_addr=get_internal_ip(csid.locator_block_address, node_id)
+        )
+        logging.debug(f"Creating nft srv6 table: {nft_rule}")
+        run(["nft", "-f", "-"], input=nft_rule.encode())
         run(["ip", "route", "add", "local", csid.get_node_function_address(node_id, cidr="network"), "encap", "seg6local",
              "action", "End", "flavors", "next-csid", "lblen", str(csid.lblen), "nflen", str(csid.nflen), "dev", "lo"])
         if tunnel6_ifname is not None:
@@ -105,22 +104,37 @@ def setup_seg6_csid(
     else:
         logging.info(f"SRv6 CSID setup successfully")
 
-def sync_seg6_routes(csid: SRv6CSID, route_table: dict[int, list[int]], flush: bool = False):
-    nft_commands = ["flush set ip6 srv6 srv6_paths"] if flush else []
-    for nid, hops in route_table.items():
-        key = get_internal_ip(csid.locator_block_address, nid)
-        value = csid.get_srv6_address(hops)
-        nft_commands.append(f"destroy element ip6 srv6 srv6_paths {{ {key} }}")
-        nft_commands.append(f"add element ip6 srv6 srv6_paths {{ {key} : {value} }}")
-    if not nft_commands:
-        return
-    nft_commands_str = "\n".join(nft_commands)
-    logging.debug(f"Updating nftables map:\n{nft_commands_str}")
+def sync_seg6_routes(
+    csid: SRv6CSID, *,
+    add: dict[int, list[int]] = None,
+    replace: dict[int, list[int]] = None,
+    delete: set[int] = None,
+    flush: bool = False
+):
     try:
+        add = {} if add is None else add
+        replace = {} if replace is None else replace
+        delete = set() if delete is None else delete
+        add.update(replace)
+        delete |= replace.keys()
+
+        nft_commands = ["flush map ip6 srv6 srv6_paths"] if flush else []
+        if delete and not flush:
+            for nid in delete:
+                key = get_internal_ip(csid.locator_block_address, nid)
+                nft_commands.append(f"delete element ip6 srv6 srv6_paths {{ {key} }}")
+        for nid, hops in add.items():
+            key = get_internal_ip(csid.locator_block_address, nid)
+            value = csid.get_srv6_address(hops)
+            nft_commands.append(f"add element ip6 srv6 srv6_paths {{ {key} : {value} }}")
+        if not nft_commands:
+            return
+        nft_commands_str = "\n".join(nft_commands)
+        logging.debug(f"Updating nftables map:\n{nft_commands_str}")
         run(["nft", "-f", "-"], input=nft_commands_str.encode())
     except CalledProcessError as e:
         log_called_process_error(logging.warning, e)
     except Exception as e:
         logging.warning(f"Failed to sync SRv6 routes: {e!r}")
     else:
-        logging.info(f"SRv6 routes synced successfully ({len(route_table)} routes updated)")
+        logging.info(f"SRv6 routes synced successfully")

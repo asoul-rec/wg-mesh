@@ -15,9 +15,9 @@ from ._version import *
 from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
-from .linux_net.seg6 import setup_seg6_csid, sync_seg6_routes
 from .crypto import encrypt_payload, decrypt_payload
 from .node import Node, LocalNode, load_conf, save_conf
+from .routing import Seg6Controller
 
 
 class MeshProtocol(asyncio.DatagramProtocol):
@@ -48,6 +48,7 @@ class MeshController:
         self.me = None
         self.transport = None
         self.pending_acks = {}
+        self.seg6_controller = None
         self._send_history = collections.deque()
         self._announce_task = None
         self._wg_update_pending = False
@@ -95,7 +96,8 @@ class MeshController:
             setup_wg_interface("wg0", self.me.private_key, my_cidr, self.me.node_id, csid=self.me.csid)
             self.trigger_wg_update()
             if self.me.csid is not None:
-                setup_seg6_csid(self.me.node_id, "wg0", csid=self.me.csid, vrf_table=100, tunnel6_ifname="tun6-mesh")
+                self.seg6_controller = Seg6Controller(self.me.csid)
+                self.seg6_controller.setup(self.me.node_id, "wg0", vrf_table=100, tunnel6_ifname="tun6-mesh")
             if (gre_network := self.me.gre_network):
                 gre_cidr = get_internal_ip(gre_network, self.me.node_id, cidr="network")
                 setup_gre_interface("gre-mesh", gre_cidr)
@@ -177,8 +179,8 @@ class MeshController:
 
         pkt_version, = struct.unpack('!I', data[:4])
         if pkt_version >> 8 != VERSION >> 8:
-            logging.warning(f"Cannot process package with incompatible version {int_to_version(pkt_version)}, "
-                            f"current version {VERSION_STR}")
+            logging.warning(f"Cannot process packet from {sender_ip} with incompatible version "
+                            f"{int_to_version(pkt_version)}, current version {VERSION_STR}")
             return
 
         try:
@@ -548,7 +550,7 @@ class MeshController:
                 if route_table:
                     logging.debug(f"Computed SRv6 routing table: {route_table}")
                     try:
-                        sync_seg6_routes(self.me.csid, route_table, flush=False)
+                        self.seg6_controller.sync_routes(route_table, flush=False)
                     except Exception as e:
                         logging.error(f"Failed to sync SRv6 routes: {e!r}")
         except Exception as e:
