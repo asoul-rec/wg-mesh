@@ -16,7 +16,7 @@ from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
 from .linux_net.seg6 import setup_seg6_csid, sync_seg6_routes
 from .crypto import encrypt_payload, decrypt_payload
-from .node import Node, load_conf, save_conf
+from .node import Node, LocalNode, load_conf, save_conf
 
 
 class MeshProtocol(asyncio.DatagramProtocol):
@@ -36,6 +36,9 @@ class MeshController:
     KEEPALIVE_ROAMING_INTERVAL = (15, 25)
     KEEPALIVE_OFFLINE_INTERVAL = (12, 12)
     MESH_UDP_LISTEN_PORT = 8080
+
+    me: LocalNode
+    known_nodes: dict[int, Node]
 
     def __init__(self, config_file, dry_run=False):
         self.config_file = config_file
@@ -297,6 +300,7 @@ class MeshController:
                 source_needs_correction = True
             if seq_diff > 0:
                 local_n.seq_num = recv_seq
+                local_n.route_cost = recv_n.get("route_cost", {})
                 if not conflict:
                     local_n.timestamp = max(local_n.timestamp, recv_ts)
                 seq_changed = True
@@ -324,7 +328,7 @@ class MeshController:
 
     def process_ack(self, origin_id, seq_num, sender_ip, pkt_tag):
         loop = asyncio.get_running_loop()
-        logging.debug(f"Received ack from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}, pkt_tag={pkt_tag}")
+        logging.debug(f"Received ack from {sender_ip}, origin_id={origin_id}, seq_num={seq_num}, pkt_tag={pkt_tag}")
         task_key = (sender_ip, origin_id, seq_num)
         if task_key in self.pending_acks:
             self.pending_acks[task_key].put_nowait((pkt_tag, loop.time()))
@@ -373,6 +377,13 @@ class MeshController:
             await asyncio.sleep(sleep_time)
         # Do broadcast
         self._send_history.append(loop.time())
+        curr_time = loop.time()
+        self.me.route_cost = {
+            str(nid): neighbor.get_link_cost(curr_time)
+            for nid, neighbor in self.known_nodes.items()
+            if nid != self.me.node_id
+        }
+        logging.debug(f"Route cost {self.me.route_cost}")
         self.bump_my_seq()
         logging.info(f"Announcing self-state, seq_num={self.me.seq_num}")
         payload_data = {
@@ -476,14 +487,14 @@ class MeshController:
                     if recv_tag == attempt:
                         logging.debug(f"ACK received for {task_key}, pkt_tag={recv_tag}")
                         if target_nid in self.known_nodes:
-                            self.known_nodes[target_nid].record_traffic_stat(timestamp=start_time, rtt=round((recv_time - start_time) * 1000))
+                            self.known_nodes[target_nid].record_traffic_stat((start_time, round((recv_time - start_time) * 1000)))
                     else:
                         logging.debug(f"Stale ACK received for {task_key}, expected tag {attempt}, got {recv_tag}. Aborting further retries.")
                     return
                 except asyncio.TimeoutError:
                     logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
                     if target_nid in self.known_nodes:
-                        self.known_nodes[target_nid].record_traffic_stat(timestamp=start_time, rtt=-1)
+                        self.known_nodes[target_nid].record_traffic_stat((start_time, -1))
             # All attempts failed
             logging.info(f"Failed to send packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
         finally:

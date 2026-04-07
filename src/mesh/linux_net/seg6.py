@@ -53,6 +53,10 @@ def setup_seg6_csid(
                     iif "{iface}" ip6 saddr {lb_net} ip6 daddr {node_net} notrack accept
                     iif "{iface}" ip6 saddr {lb_net} counter drop
                 }}
+                chain forward {{
+                    type filter hook forward priority filter; policy accept;
+                    ip6 saddr {lb_net} counter
+                }}
                 chain mangle_output {{
                     type filter hook output priority mangle; policy accept;
                     oif "{iface}" ip6 daddr {lb_net} ip6 daddr set ip6 daddr map @srv6_paths accept

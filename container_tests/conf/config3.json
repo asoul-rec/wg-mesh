@@ -12,9 +12,18 @@
         },
         "seq_num": 4294967290,
         "private_key": "KJoNrU8bVYcbsF+jqP39SC9QQUarXh2Wzypay/HSL2A=",
-        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg="
+        "public_key": "wBsmLhwCrR1o0bwZPwi0m0uZzkxnTwdhKmd2ZALTWHg=",
+        "route_cost": {
+            "1": 1,
+            "4": 3,
+            "5": 3
+        }
     },
     "peers": [
+        {
+            "node_id": 1,
+            "pubkey": "KDrEX85VNrZhEeKdeRH6kh9BbzosLprrgYHfwNtt+gk="
+        },
         {
             "node_id": 4,
             "pubkey": "lGogn8FU9sNtuJb+9fwSekysFib4N8+4gjXDdCCAMyE=",

@@ -5,8 +5,10 @@
 !/README.md
 !/uv.lock
 !/src
-!/src/**
-!/src/**/*.py
+!/src/mesh
+!/src/mesh/*.py
+!/src/mesh/linux_net
+!/src/mesh/linux_net/*.py
 
 # test environment
 !/.dockerignore
