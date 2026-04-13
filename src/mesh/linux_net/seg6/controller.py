@@ -1,5 +1,5 @@
-from .linux_net.seg6 import setup_seg6_csid, sync_seg6_routes
-from .utils import SRv6CSID
+from .operations import setup_seg6_csid, sync_seg6_routes
+from .csid import SRv6CSID
 
 
 class Seg6Controller:

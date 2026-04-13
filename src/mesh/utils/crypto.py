@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import os
 
+
 __all__ = [
     "encrypt_payload",
     "decrypt_payload",

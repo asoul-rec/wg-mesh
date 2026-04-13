@@ -5,7 +5,8 @@ import asyncio
 import copy
 from typing import Optional
 
-from ..utils import get_internal_ip, SRv6CSID
+from ..utils.ip import get_internal_ip
+from .seg6 import SRv6CSID
 from .proc import run, run_async
 
 

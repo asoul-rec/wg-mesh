@@ -9,6 +9,10 @@
 !/src/mesh/*.py
 !/src/mesh/linux_net
 !/src/mesh/linux_net/*.py
+!/src/mesh/linux_net/seg6
+!/src/mesh/linux_net/seg6/*.py
+!/src/mesh/utils
+!/src/mesh/utils/*.py
 
 # test environment
 !/.dockerignore

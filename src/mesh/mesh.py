@@ -10,14 +10,15 @@ import signal
 import struct
 import time
 
-from .utils import *
 from ._version import *
 from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
-from .crypto import encrypt_payload, decrypt_payload
+from .linux_net.seg6 import Seg6Controller
+from .utils.crypto import *
+from .utils.ip import *
+from .utils.algorithm import compute_shortest_paths, wrapping_sub
 from .node import Node, LocalNode, load_conf, save_conf
-from .routing import Seg6Controller
 
 
 class MeshProtocol(asyncio.DatagramProtocol):
@@ -29,6 +30,48 @@ class MeshProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         self.controller.handle_packet(data, addr[0])
+
+
+class MeshPacket:
+    OUTER_HEADER_FMT = '!I'
+    OUTER_HEADER_LEN = struct.calcsize(OUTER_HEADER_FMT)
+    INNER_HEADER_FMT = '!BIIB10s'
+    INNER_HEADER_LEN = struct.calcsize(INNER_HEADER_FMT)
+
+    class Error(Exception):
+        pass
+
+    @staticmethod
+    def pack(pkt_type, origin_id, seq_num, pkt_tag, payload, *, target_key):
+        raw_data = struct.pack(MeshPacket.INNER_HEADER_FMT, pkt_type, origin_id, seq_num, pkt_tag, b'\x00'*10) + payload
+        encrypted_data = encrypt_payload(target_key, raw_data)
+        packet = struct.pack(MeshPacket.OUTER_HEADER_FMT, VERSION) + encrypted_data
+        return packet
+
+    @staticmethod
+    def unpack(packet, my_key):
+        # Outer header check
+        if len(packet) < MeshPacket.OUTER_HEADER_LEN:
+            raise MeshPacket.Error(f"Bad raw packet of length {len(packet)}")
+        pkt_version, = struct.unpack(MeshPacket.OUTER_HEADER_FMT, packet[:MeshPacket.OUTER_HEADER_LEN])
+        if pkt_version >> 8 != VERSION >> 8:
+            raise MeshPacket.Error(f"Incompatible version {int_to_version(pkt_version)}, current version {VERSION_STR}")
+        # Decrypt payload
+        try:
+            decrypted = decrypt_payload(my_key, packet[MeshPacket.OUTER_HEADER_LEN:])
+        except Exception as e:
+            raise MeshPacket.Error(f"Failed to decrypt packet: {e!r}")
+        if len(decrypted) < MeshPacket.INNER_HEADER_LEN:
+            raise MeshPacket.Error(f"Malformed decrypted packet of length {len(decrypted)}")
+        # Unpack payload
+        pkt_type, origin_id, seq_num, pkt_tag, _ = struct.unpack(MeshPacket.INNER_HEADER_FMT, decrypted[:MeshPacket.INNER_HEADER_LEN])
+        return {
+            "pkt_type": pkt_type,
+            "origin_id": origin_id,
+            "seq_num": seq_num,
+            "pkt_tag": pkt_tag,
+            "payload": decrypted[MeshPacket.INNER_HEADER_LEN:],
+        }
 
 
 class MeshController:
@@ -173,45 +216,28 @@ class MeshController:
 
     def handle_packet(self, data, sender_ip):
         logging.debug(f"Received packet from {sender_ip}, length={len(data)}")
-        if len(data) < 4:
-            logging.warning(f"Bad packet from {sender_ip}, too short")
-            return
-
-        pkt_version, = struct.unpack('!I', data[:4])
-        if pkt_version >> 8 != VERSION >> 8:
-            logging.warning(f"Cannot process packet from {sender_ip} with incompatible version "
-                            f"{int_to_version(pkt_version)}, current version {VERSION_STR}")
-            return
-
+        # Notify after packet decrypted and authenticated successfully
         try:
-            decrypted = decrypt_payload(self.me.pubkey, data[4:])
-        except Exception as e:
-            logging.error(f"Failed to decrypt packet from {sender_ip}: {e!r}")
+            pkt = MeshPacket.unpack(data, self.me.pubkey)
+            pkt_type, origin_id, seq_num, pkt_tag, payload = pkt["pkt_type"], pkt["origin_id"], pkt["seq_num"], pkt["pkt_tag"], pkt["payload"]
+        except MeshPacket.Error as e:
+            logging.warning(f"Failed to unpack packet from {sender_ip}: {e}")
             return
-
-        # Packet decrypted and authenticated successfully
         self._inbound_event.set()
-
-        if len(decrypted) < 20:
-            logging.warning(f"Malformed decrypted packet from {sender_ip}")
-            return
-
-        pkt_type, origin_id, seq_num, pkt_tag = struct.unpack('!BIIB', decrypted[:10])
-        payload_data = decrypted[20:]
-
+        # Dispatch to different handlers
         if pkt_type == 1:
-            # this will not happen for well-behaved neighbors
             if origin_id == self.me.node_id:
+                # This will not happen for well-behaved neighbors
                 logging.warning(f"{sender_ip} sent my announce back to me, dropping")
             else:
-                self.process_announce(origin_id, seq_num, pkt_tag, payload_data, sender_ip)
+                self.process_announce(origin_id, seq_num, pkt_tag, payload, sender_ip)
         elif pkt_type == 2:
             self.process_ack(origin_id, seq_num, sender_ip, pkt_tag)
         elif pkt_type == 3:
             if origin_id == self.me.node_id:
                 logging.warning(f"{sender_ip} sent my route cost back to me, dropping")
             else:
-                self.process_route_cost(origin_id, seq_num, pkt_tag, payload_data, sender_ip)
+                self.process_route_cost(origin_id, seq_num, pkt_tag, payload, sender_ip)
 
     def process_announce(self, origin_id, seq_num, pkt_tag, payload, sender_ip):
         logging.debug(f"Received announce from {origin_id}, seq_num={seq_num}, sender_ip={sender_ip}")
@@ -366,12 +392,10 @@ class MeshController:
         if task_key in self.pending_acks:
             self.pending_acks[task_key].put_nowait((pkt_tag, loop.time()))
 
-    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, target_pubkey, payload=b"", pkt_tag=0):
+    def send_packet(self, target_ip, pkt_type, origin_id, seq_num, pkt_tag, payload, *, target_key):
         if not self.transport:
             return
-        raw_data = struct.pack('!BIIB10s', pkt_type, origin_id, seq_num, pkt_tag, b'\x00'*10) + payload
-        encrypted_data = encrypt_payload(target_pubkey, raw_data)
-        packet = struct.pack('!I', VERSION) + encrypted_data
+        packet = MeshPacket.pack(pkt_type, origin_id, seq_num, pkt_tag, payload, target_key=target_key)
         logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], "
                       f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}, tag: {pkt_tag}")
         self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
@@ -382,7 +406,7 @@ class MeshController:
             logging.error(f"Cannot send ACK, missing pubkey for immediate sender IP {target_ip} (node {sender_id})")
             return
         target_pubkey = self.known_nodes[sender_id].pubkey
-        self.send_packet(target_ip, 2, origin_id, seq_num, target_pubkey, pkt_tag=pkt_tag)
+        self.send_packet(target_ip, 2, origin_id, seq_num, pkt_tag, b'', target_key=target_pubkey)
 
     def announce(self):
         """
@@ -497,7 +521,6 @@ class MeshController:
     async def _routing_supervisor_loop(self):
         """Routing supervisor: periodically computes shortest paths and updates SRv6 routes."""
         logging.info(f"Routing supervisor loop started.")
-        NO_ROUTE = 3000
         me_id = self.me.node_id
         try:
             while True:
@@ -516,37 +539,7 @@ class MeshController:
                     }
                     for nid, node in self.known_nodes.items()
                 }
-                distances = {nid: NO_ROUTE for nid in link_state}
-                distances[me_id] = 0
-                predecessors = {nid: None for nid in link_state}
-                pq = [(0, me_id)]
-                visited = set()
-                while pq:
-                    current_dist, current_node = heapq.heappop(pq)
-                    if current_node in visited:
-                        continue
-                    visited.add(current_node)
-                    if current_node not in link_state:
-                        continue
-
-                    for neighbor, edge_weight in link_state[current_node].items():
-                        edge_weight = 1 if edge_weight < 1 else edge_weight
-                        new_dist = current_dist + edge_weight
-                        if new_dist < distances[neighbor]:
-                            distances[neighbor] = new_dist
-                            predecessors[neighbor] = current_node
-                            heapq.heappush(pq, (new_dist, neighbor))
-
-                route_table = {}
-                for target_nid in link_state:
-                    if target_nid == me_id or distances[target_nid] == NO_ROUTE:
-                        continue
-                    path = []
-                    curr = target_nid
-                    while curr != me_id:
-                        path.append(curr)
-                        curr = predecessors[curr]
-                    route_table[target_nid] = path[::-1]
+                route_table = compute_shortest_paths(link_state, me_id)
                 if route_table:
                     logging.debug(f"Computed SRv6 routing table: {route_table}")
                     try:
@@ -575,19 +568,14 @@ class MeshController:
             target_nid = get_node_id_from_ip(self.me.network, target_ip)
             loop = asyncio.get_running_loop()
             for attempt in range(3):
-                # Ensure the current task is still valid
+                # Send data after validating current task
                 if origin_id not in self.known_nodes or self.known_nodes[origin_id].seq_num != seq_num:
                     logging.debug(f"Aborting reliable_send: seq {seq_num} for node {origin_id} is now stale.")
                     return
                 if not self.transport:
                     logging.warning(f"Transport is not ready, aborting reliable_send")
                     return
-                # Send data
-                raw_data = struct.pack('!BIIB10s', pkt_type, origin_id, seq_num, attempt, b'\x00'*10) + payload
-                encrypted_data = encrypt_payload(target_pubkey, raw_data)
-                packet = struct.pack('!I', VERSION) + encrypted_data
-                logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}, tag: {attempt}")
-                self.transport.sendto(packet, (target_ip, self.MESH_UDP_LISTEN_PORT))
+                self.send_packet(target_ip, pkt_type, origin_id, seq_num, attempt, payload, target_key=target_pubkey)
                 # Process ack
                 start_time = loop.time()
                 try:

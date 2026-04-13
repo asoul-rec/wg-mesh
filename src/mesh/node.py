@@ -9,7 +9,8 @@ from itertools import pairwise
 from typing import Optional
 
 from .linux_net.wg import generate_wg_keys
-from .utils import SRv6CSID
+from .utils.algorithm import LinkCostSummary
+from .linux_net.seg6 import SRv6CSID
 
 
 @dataclass
@@ -34,49 +35,8 @@ class Node:
         logging.debug(f"Stats for node {self.node_id}: {list(self._traffic_stats)[-10:]}")
 
     def get_link_cost(self, curr_time: float) -> int:
-        """
-        Compute a weighted-average RTT cost for this peer link using exponential time decay.
-
-        Each sample is assigned a weight by integrating the exponential decay PDF
-        ``f(t) = ln(2)/HALF_LIFE * 2^(-(curr_time - t)/HALF_LIFE)`` over the interval
-        from the previous midpoint to the next midpoint between consecutive samples
-        (sorted newest-first). Because the PDF integrates to 1 over ``(-inf, curr_time]``,
-        the weights naturally sum to 1 when all history is covered.
-
-        Individual weights are capped at ``WEIGHT_CAP`` to prevent any single sample
-        from dominating. If the oldest sample still leaves unassigned weight, the
-        result is rescaled to normalize over the covered portion. Lost packets
-        (``rtt < 0``) are substituted with ``LOST_PENALTY`` ms.
-
-        :param curr_time: The current monotonic time (``loop.time()``).
-        :return: The weighted link cost in milliseconds, minimum 1.
-        """
-        LOST_PENALTY = 3000
-        HALF_LIFE = 20
-        WEIGHT_CAP = 0.2
-        if not self._traffic_stats:
-            return LOST_PENALTY
-        decay = -math.log(2) / HALF_LIFE
-        cost = 0
-        sorted_stats = sorted(self._traffic_stats, reverse=True)
-        weight_left = 1
-        for (t_i, rtt_i), (t_prev, _) in pairwise(sorted_stats):
-            rtt_i = rtt_i if rtt_i > 0 else LOST_PENALTY
-            if weight_left < 0.01:
-                cost += weight_left * rtt_i
-                break
-            weight = weight_left - math.e ** (decay * (curr_time - (t_prev + t_i) / 2))
-            weight = WEIGHT_CAP if weight > WEIGHT_CAP else weight
-            cost += weight * rtt_i
-            weight_left -= weight
-        else:  # reach the final item but has significant weight_left
-            rtt_i = sorted_stats[-1][1]
-            rtt_i = rtt_i if rtt_i > 0 else LOST_PENALTY
-            weight = WEIGHT_CAP if weight_left > WEIGHT_CAP else weight_left
-            cost += weight * rtt_i
-            cost /= 1 - (weight_left - weight)
-        cost = 1 if cost < 1 else cost
-        return round(cost)
+        cost = LinkCostSummary.exponential_decay_integral(self._traffic_stats, curr_time)
+        return 3000 if cost > 3000 else cost
 
     def to_dict(self):
         d = {

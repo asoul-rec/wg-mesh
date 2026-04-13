@@ -3,9 +3,10 @@ import logging
 from subprocess import CalledProcessError
 from typing import Optional, Union, Literal
 
-from .proc import run, log_called_process_error
-from .vrf import VRFTable
-from ..utils import SRv6CSID, get_internal_ip
+from ...utils.ip import get_internal_ip
+from ..proc import run, log_called_process_error
+from ..vrf import VRFTable
+from .csid import SRv6CSID
 
 
 def setup_seg6_csid(
