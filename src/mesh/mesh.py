@@ -11,6 +11,7 @@ import struct
 import time
 
 from ._version import *
+from .daemons import *
 from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
@@ -83,6 +84,7 @@ class MeshController:
 
     me: LocalNode
     known_nodes: dict[int, Node]
+    daemons: dict[str, Daemon]
 
     def __init__(self, config_file, dry_run=False):
         self.config_file = config_file
@@ -97,17 +99,13 @@ class MeshController:
         self._wg_update_pending = False
         self._wg_task = None
         self._background_tasks = set()
-        self._keepalive_event = asyncio.Event()
-        self._keepalive_task = None
-        self._inbound_event = asyncio.Event()
-        self._online_monitor_task = None
-        self._routing_supervisor_event = asyncio.Event()
-        self._routing_supervisor_task = None
-        # active broadcast at start
-        self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
-        self._offline = True
-        logging.info(f"MeshController starting, version: {VERSION_STR}")
+        # Prepare daemons based on config
         self.load_conf()
+        self.daemons = {}
+        self._add_online_monitor()
+        self._add_keepalive()
+        self._add_routing_loop()
+        logging.info(f"MeshController starting, version: {VERSION_STR}")
 
     def load_conf(self):
         self.me, self.known_nodes = load_conf(self.config_file)
@@ -116,6 +114,48 @@ class MeshController:
 
     def save_conf(self):
         save_conf(self.config_file, self.me, self.known_nodes)
+
+    def _add_online_monitor(self):
+        def _online_callback():
+            self.bump_my_seq(2 * self.STALE_TOLERANCE)
+            self.announce()
+            if keepalive := self.daemons.get("keepalive"):
+                online_interval = self.KEEPALIVE_STATIC_INTERVAL if self.me.endpoint else self.KEEPALIVE_ROAMING_INTERVAL
+                monitor.timeout = online_interval[1] + 3
+                keepalive.keepalive_interval = online_interval
+                keepalive.keepalive_event.set()
+            else:
+                monitor.timeout = None  # Never goes offline since we can't decide the threshold
+
+        def _offline_callback():
+            monitor.timeout = None
+            if keepalive := self.daemons.get("keepalive"):
+                keepalive.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
+                keepalive.keepalive_event.set()
+
+        self.daemons["online_monitor"] = monitor = OnlineMonitor(_online_callback, _offline_callback)
+
+    def _add_keepalive(self):
+        self.daemons["keepalive"] = KeepAlive(self.announce, self.KEEPALIVE_OFFLINE_INTERVAL)
+
+    def _add_routing_loop(self):
+        def _get_link_state():
+            # Compute route_costs and broadcast to neighbors before updating routes
+            self.announce_route_cost()
+            return {
+                nid: {
+                    neighbor_nid: cost
+                    for neighbor_str, cost in node.route_cost.items()
+                    if (neighbor_nid := int(neighbor_str)) in self.known_nodes
+                }
+                for nid, node in self.known_nodes.items()
+            }
+        if self.me.csid is not None:
+            self.daemons["routing"] = Routing(
+                me_id=self.me.node_id,
+                link_state_callback=_get_link_state,
+                sync_route_callback=lambda rt: self.seg6_controller.sync_routes(rt, flush=False)
+            )
 
     async def run(self):
         loop = asyncio.get_running_loop()
@@ -162,18 +202,12 @@ class MeshController:
         try:
             self.bump_my_seq()
             self.announce()
-            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-            self._online_monitor_task = asyncio.create_task(self._online_monitor_loop())
-            if self.me.csid is not None:
-                self._routing_supervisor_task = asyncio.create_task(self._routing_supervisor_loop())
+            for d in self.daemons.values():
+                d.start()
             await stop_event.wait()
         finally:
-            if self._keepalive_task:
-                self._keepalive_task.cancel()
-            if self._online_monitor_task:
-                self._online_monitor_task.cancel()
-            if self._routing_supervisor_task:
-                self._routing_supervisor_task.cancel()
+            for d in self.daemons.values():
+                d.stop()
             if self._wg_task:
                 self._wg_task.cancel()
             for task in self._background_tasks:
@@ -201,8 +235,8 @@ class MeshController:
                     sync_direct_peers("gre-mesh", peer_keys, gre_network, self.me.network)
                 if (vxlan_network := self.me.vxlan_network):
                     sync_vxlan_peers("vxlan-mesh", peer_keys, vxlan_network, self.me.network)
-                if (csid := self.me.csid):
-                    self._routing_supervisor_event.set()
+                if routing := self.daemons.get("routing"):
+                    routing.update_event.set()
             except Exception as e:
                 logging.error(f"Failed to sync wg peers: {e!r}")
             except asyncio.CancelledError:
@@ -216,14 +250,17 @@ class MeshController:
 
     def handle_packet(self, data, sender_ip):
         logging.debug(f"Received packet from {sender_ip}, length={len(data)}")
-        # Notify after packet decrypted and authenticated successfully
+        # Notify online monitor after packet decrypted and authenticated successfully
         try:
             pkt = MeshPacket.unpack(data, self.me.pubkey)
             pkt_type, origin_id, seq_num, pkt_tag, payload = pkt["pkt_type"], pkt["origin_id"], pkt["seq_num"], pkt["pkt_tag"], pkt["payload"]
         except MeshPacket.Error as e:
             logging.warning(f"Failed to unpack packet from {sender_ip}: {e}")
             return
-        self._inbound_event.set()
+        try:
+            self.daemons["online_monitor"].online_event.set()
+        except KeyError:
+            pass
         # Dispatch to different handlers
         if pkt_type == 1:
             if origin_id == self.me.node_id:
@@ -421,7 +458,9 @@ class MeshController:
         """Stateless exponential backoff for self-correction broadcasts."""
         loop = asyncio.get_running_loop()
         # Relief throttling based on keepalive interval
-        throttle_window = min(120, self.keepalive_interval[0])
+        throttle_window = 120
+        if keepalive := self.daemons.get("keepalive"):
+            throttle_window = min(throttle_window, keepalive.keepalive_interval[1])
         cutoff_time = loop.time() - throttle_window
         while self._send_history and self._send_history[0] < cutoff_time:
             self._send_history.popleft()
@@ -470,87 +509,10 @@ class MeshController:
             task = asyncio.create_task(self.reliable_send(target_ip, pkt_type, origin_id, seq_num, payload, neighbor.pubkey))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-        self._keepalive_event.set()
-
-    async def _keepalive_loop(self):
-        """Keepalive loop: if no broadcast has fired within interval, bump seq and self-broadcast."""
-        logging.info(f"Keepalive loop started.")
         try:
-            while True:
-                self._keepalive_event.clear()
-                interval = random.uniform(*self.keepalive_interval)
-                try:
-                    await asyncio.wait_for(self._keepalive_event.wait(), timeout=interval)
-                except asyncio.TimeoutError:
-                    logging.debug(f"Keepalive ({interval:.3f}s) firing broadcast")
-                    self.announce()
-        except Exception as e:
-            logging.warning(f"Keepalive loop failed: {e!r}")
-            raise
-        finally:
-            logging.info(f"Keepalive loop terminated.")
-
-    async def _online_monitor_loop(self):
-        """Online status monitor: triggers small interval if no valid packets are received from mesh."""
-        logging.info(f"Online status monitor started.")
-        try:
-            while True:
-                self._inbound_event.clear()
-                # expect to receive packet at least every keepalive_interval[1] + 3 seconds
-                timeout = self.keepalive_interval[1] + 3
-                logging.debug(f"Online status monitor waiting {timeout}s for packets")
-                try:
-                    await asyncio.wait_for(self._inbound_event.wait(), timeout=timeout)
-                    if self._offline:
-                        logging.info("Node is back online.")
-                        self._offline = False
-                        # Force announce to sync seq num with peers
-                        self.bump_my_seq(2 * self.STALE_TOLERANCE)
-                        self.announce()
-                        self.keepalive_interval = self.KEEPALIVE_STATIC_INTERVAL if self.me.endpoint else self.KEEPALIVE_ROAMING_INTERVAL
-                        self._keepalive_event.set() # Wake up keepalive to revert to normal interval
-                except asyncio.TimeoutError:
-                    if not self._offline:
-                        logging.warning(f"Connection lost! ({timeout}s without packets)")
-                        self._offline = True
-                        self.keepalive_interval = self.KEEPALIVE_OFFLINE_INTERVAL
-                        self._keepalive_event.set() # Wake up keepalive to enforce aggressive broadcast interval
-        finally:
-            logging.info(f"Online status monitor terminated.")
-
-    async def _routing_supervisor_loop(self):
-        """Routing supervisor: periodically computes shortest paths and updates SRv6 routes."""
-        logging.info(f"Routing supervisor loop started.")
-        me_id = self.me.node_id
-        try:
-            while True:
-                self._routing_supervisor_event.clear()
-                try:
-                    await asyncio.wait_for(self._routing_supervisor_event.wait(), timeout=60.0)
-                except asyncio.TimeoutError:
-                    pass
-                # Compute route_costs and broadcast to neighbors before updating routes
-                self.announce_route_cost()
-                link_state = {
-                    nid: {
-                        neighbor_nid: cost
-                        for neighbor_str, cost in node.route_cost.items()
-                        if (neighbor_nid := int(neighbor_str)) in self.known_nodes
-                    }
-                    for nid, node in self.known_nodes.items()
-                }
-                route_table = compute_shortest_paths(link_state, me_id)
-                if route_table:
-                    logging.debug(f"Computed SRv6 routing table: {route_table}")
-                    try:
-                        self.seg6_controller.sync_routes(route_table, flush=False)
-                    except Exception as e:
-                        logging.error(f"Failed to sync SRv6 routes: {e!r}")
-        except Exception as e:
-            logging.warning(f"Routing supervisor loop failed: {e!r}")
-            raise
-        finally:
-            logging.info(f"Routing supervisor loop terminated.")
+            self.daemons["keepalive"].keepalive_event.set()
+        except KeyError:
+            pass
 
     async def reliable_send(self, target_ip, pkt_type, origin_id, seq_num, payload, target_pubkey):
         """
