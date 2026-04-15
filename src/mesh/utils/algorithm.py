@@ -55,7 +55,7 @@ def compute_shortest_paths(link_state, me_id, no_route_val=3000):
             path.append(curr)
             curr = predecessors[curr]
         route_table[target_nid] = path[::-1]
-    return route_table
+    return route_table, distances
 
 
 class LinkCostSummary:

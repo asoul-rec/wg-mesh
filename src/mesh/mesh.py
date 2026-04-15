@@ -18,7 +18,7 @@ from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
 from .linux_net.seg6 import Seg6Controller
 from .utils.crypto import *
 from .utils.ip import *
-from .utils.algorithm import compute_shortest_paths, wrapping_sub
+from .utils.algorithm import wrapping_sub
 from .node import Node, LocalNode, load_conf, save_conf
 
 
@@ -187,7 +187,7 @@ class MeshController:
             if (vxlan_network := self.me.vxlan_network):
                 vxlan_cidr = get_internal_ip(vxlan_network, self.me.node_id, cidr="network")
                 setup_vxlan_interface("vxlan-mesh", vxlan_cidr, "wg0", my_ip)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
 
         logging.info(f"Binding UDP endpoint on [{my_ip}:{self.MESH_UDP_LISTEN_PORT}]")
         try:
@@ -198,10 +198,12 @@ class MeshController:
         except Exception as e:
             logging.error(f"Failed to bind UDP endpoint [{my_ip}:{self.MESH_UDP_LISTEN_PORT}]: {e!r}")
             return
+        await asyncio.sleep(0.1)
 
         try:
             self.bump_my_seq()
             self.announce()
+            await asyncio.sleep(0.1)
             for d in self.daemons.values():
                 d.start()
             await stop_event.wait()
@@ -210,6 +212,8 @@ class MeshController:
                 d.stop()
             if self._wg_task:
                 self._wg_task.cancel()
+            if self._announce_task:
+                self._announce_task.cancel()
             for task in self._background_tasks:
                 task.cancel()
             transport.close()
@@ -553,6 +557,8 @@ class MeshController:
                     logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
                     if target_nid in self.known_nodes:
                         self.known_nodes[target_nid].record_traffic_stat((start_time, -1))
+                        if self.me.route_cost.get(str(target_nid), 3000) < 3000 and (routing := self.daemons.get("routing")):
+                            routing.update_event.set()
             # All attempts failed
             logging.info(f"Failed to send packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}")
         finally:

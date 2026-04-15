@@ -106,13 +106,14 @@ class Routing(Daemon):
     async def _loop(self):
         self.update_event.clear()
         try:
+            await asyncio.sleep(3)
             await asyncio.wait_for(self.update_event.wait(), timeout=60.0)
         except asyncio.TimeoutError:
             pass
         link_state = self.link_state_callback()
-        route_table = compute_shortest_paths(link_state, self.me_id)
+        route_table, distances = compute_shortest_paths(link_state, self.me_id)
         if route_table:
-            logging.debug(f"Computed routing table: {route_table}")
+            logging.debug(f"Update routing {route_table=}, {distances=}")
             try:
                 self.sync_route_callback(route_table)
             except Exception as e:
