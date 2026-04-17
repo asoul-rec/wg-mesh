@@ -20,6 +20,7 @@ from .linux_net.vrf import VRFTable
 from .utils.crypto import *
 from .utils.ip import *
 from .utils.algorithm import wrapping_sub
+from .utils.version import *
 from .node import Node, LocalNode, load_conf, save_conf
 
 
