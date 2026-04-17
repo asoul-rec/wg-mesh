@@ -13,6 +13,11 @@ services:
     networks:
       main:
         ipv4_address: 172.20.123.1
+        interface_name: eth0
+        gw_priority: 1
+      extra:
+        ipv4_address: 172.20.124.1
+        interface_name: eth1
 
   node2:
     build: .
@@ -27,6 +32,8 @@ services:
     networks:
       main:
         ipv4_address: 172.20.123.2
+      extra:
+        ipv4_address: 172.20.124.2
 
   node3:
     build: .
@@ -41,6 +48,11 @@ services:
     networks:
       main:
         ipv4_address: 172.20.123.3
+        interface_name: eth0
+        gw_priority: 1
+      extra:
+        ipv4_address: 172.20.124.3
+        interface_name: eth1
 
   node4:
     build: .
@@ -55,6 +67,8 @@ services:
     networks:
       main:
         ipv4_address: 172.20.123.4
+      extra:
+        ipv4_address: 172.20.124.4
 
   node5:
     build: .
@@ -70,6 +84,8 @@ services:
     networks:
       main:
         ipv4_address: 172.20.123.5
+      extra:
+        ipv4_address: 172.20.124.5
 
 networks:
   main:
@@ -78,3 +94,9 @@ networks:
       config:
         - subnet: 172.20.123.0/24
           gateway: 172.20.123.234
+  extra:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.124.0/24
+          gateway: 172.20.124.234

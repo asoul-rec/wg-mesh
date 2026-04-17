@@ -62,7 +62,7 @@ def setup_wg_interface(iface_name: str, private_key: str, cidr: str, node_id: in
 
 _sync_wg_peers_running = False
 
-async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, network_addr: str, csid: Optional[SRv6CSID]=None):
+async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, network_addr: str, csid: Optional[SRv6CSID]=None, vrf=None):
     """Incrementally sync WireGuard peers. Only one instance may run at a time."""
     global _sync_wg_peers_running
     if _sync_wg_peers_running:
@@ -79,6 +79,7 @@ async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, netw
             current_peers = set()
 
         expected_peers = set()
+        expected_encap_routes = {}
 
         # 1. upsert expected peers
         for nid, node in known_nodes.items():
@@ -88,6 +89,11 @@ async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, netw
             allowed_ips = [get_internal_ip(network_addr, nid, cidr="host")]
             if csid is not None:  # Allow segment routing
                 allowed_ips.append(csid.get_node_function_address(nid, cidr="network"))
+                # External IPs mapped via CSID locator encap route
+                encap_dst = get_internal_ip(csid.locator_block_address, nid, cidr=None)
+                for ext_ip in node.external_ips:
+                    expected_encap_routes[ext_ip] = encap_dst
+
             cmd = ["wg", "set", iface_name, "peer", node.pubkey, "allowed-ips", ','.join(allowed_ips)]
             if node.endpoint:
                 cmd.extend(["endpoint", node.endpoint])
@@ -109,5 +115,12 @@ async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, netw
                 logging.warning(f"wg remove timed out for stale peer {pubkey}")
             except Exception as e:
                 logging.warning(f"Failed to remove stale peer {pubkey}: {e!r}")
+
+        # 3. sync VRF external encapsulated routes logically bypassing wg keys
+        if vrf is not None and csid is not None:
+            try:
+                vrf.sync_encap_routes(expected_encap_routes, "tun6-mesh")
+            except Exception as e:
+                logging.error(f"Failed to sync external routes via VRF: {e!r}")
     finally:
         _sync_wg_peers_running = False

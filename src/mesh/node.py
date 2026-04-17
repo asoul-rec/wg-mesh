@@ -22,8 +22,9 @@ class Node:
     seq_num: int = field(default=0, repr=False)
     timestamp: int = field(default=0, repr=False)
     route_cost: dict[str, int] = field(default_factory=dict, repr=False)
+    external_ips: list[str] = field(default_factory=list, repr=False)
     protected: bool = field(default=False, kw_only=True)
-    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "protected", "_initialized"}
+    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "external_ips", "protected", "_initialized"}
     _initialized = False
 
     def __post_init__(self):
@@ -48,6 +49,8 @@ class Node:
         }
         if self.endpoint:
             d["endpoint"] = self.endpoint
+        if self.external_ips:
+            d["external_ips"] = self.external_ips
         if self.route_cost:
             d["route_cost"] = self.route_cost
         return d
@@ -74,11 +77,14 @@ class LocalNode:
     network: str
     gre_network: str = ""
     vxlan_network: str = ""
+    external_routes: dict[str, Optional[dict[str, str]]] = field(default_factory=dict)
     csid: Optional[SRv6CSID] = None
     _initialized = False
 
     def __post_init__(self):
         self._initialized = True
+        with self.node._force_write():
+            self.node.external_ips = list(self.external_routes.keys())
 
     def __getattr__(self, name):
         return getattr(self.node, name)
@@ -97,6 +103,9 @@ class LocalNode:
             d["gre_network"] = self.gre_network
         if self.vxlan_network:
             d["vxlan_network"] = self.vxlan_network
+        d.pop("external_ips", None)
+        if self.external_routes:
+            d["external_routes"] = self.external_routes
         if self.csid is not None:
             d["srv6"] = {"flavor": "next-csid", **self.csid.to_dict()}
         return d
@@ -144,6 +153,7 @@ def load_conf(config_file):
         seq_num=me_cfg.get("seq_num", 0),
         timestamp=me_cfg.get("timestamp", int(time.time())),
         route_cost=me_cfg.get("route_cost", {}),
+        # external_ips will be updated in LocalNode.__post_init__
         protected=True
     )
     me = LocalNode(
@@ -152,6 +162,7 @@ def load_conf(config_file):
         network=network_str,
         gre_network=gre_network_str,
         vxlan_network=vxlan_network_str,
+        external_routes=me_cfg.get("external_routes", {}),
         csid=csid
     )
 
@@ -169,7 +180,8 @@ def load_conf(config_file):
             endpoint=info.get("endpoint", ""),
             seq_num=info.get("seq_num", 0),
             timestamp=info.get("timestamp", 0),
-            route_cost=info.get("route_cost", {})
+            route_cost=info.get("route_cost", {}),
+            external_ips=info.get("external_ips", []),
         )
         if (cost := node_me.route_cost.get(str(peer_id), 3000)) < 3000:
             known_nodes[peer_id].record_traffic_stat((0, cost))
@@ -186,7 +198,7 @@ def save_conf(config_file, me, known_nodes):
         # reorder keys
         for key in [
             "id", "name", "private_key", "public_key", "endpoint", "network",
-            "srv6", "gre_network", "vxlan_network", "route_cost", "seq_num", "timestamp"
+            "srv6", "gre_network", "vxlan_network", "external_routes", "route_cost", "seq_num", "timestamp"
         ]:
             if key in me_dict:
                 me_dict[key] = me_dict.pop(key)

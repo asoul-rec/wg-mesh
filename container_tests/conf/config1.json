@@ -8,6 +8,12 @@
             "locator_block_address": "fd00::/8",
             "nflen": 8
         },
+        "external_routes": {
+            "172.20.124.2/32": {
+                "dev": "eth1"
+            },
+            "10.126.234.1/32": null
+        },
         "gre_network": "10.124.234.0/24",
         "vxlan_network": "10.125.234.0/24",
         "seq_num": 1,

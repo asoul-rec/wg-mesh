@@ -16,6 +16,7 @@ from .linux_net.wg import setup_wg_interface, sync_wg_peers
 from .linux_net.gre import setup_gre_interface, sync_direct_peers
 from .linux_net.vxlan import setup_vxlan_interface, sync_vxlan_peers
 from .linux_net.seg6 import Seg6Controller
+from .linux_net.vrf import VRFTable
 from .utils.crypto import *
 from .utils.ip import *
 from .utils.algorithm import wrapping_sub
@@ -98,6 +99,7 @@ class MeshController:
         self._announce_task = None
         self._wg_update_pending = False
         self._wg_task = None
+        self.vrf = VRFTable(100)
         self._background_tasks = set()
         # Prepare daemons based on config
         self.load_conf()
@@ -176,11 +178,14 @@ class MeshController:
 
         logging.info(f"Spinning up wg interface on {my_ip}")
         if not self.dry_run:
+            self.vrf.up()
+            for ext_ip, dev in self.me.external_routes.items():
+                self.vrf.add_route(ext_ip, dev)
             setup_wg_interface("wg0", self.me.private_key, my_cidr, self.me.node_id, csid=self.me.csid)
             self.trigger_wg_update()
             if self.me.csid is not None:
                 self.seg6_controller = Seg6Controller(self.me.csid)
-                self.seg6_controller.setup(self.me.node_id, "wg0", vrf_table=100, tunnel6_ifname="tun6-mesh")
+                self.seg6_controller.setup(self.me.node_id, "wg0", vrf_table=self.vrf, tunnel6_ifname="tun6-mesh")
             if (gre_network := self.me.gre_network):
                 gre_cidr = get_internal_ip(gre_network, self.me.node_id, cidr="network")
                 setup_gre_interface("gre-mesh", gre_cidr)
@@ -233,7 +238,7 @@ class MeshController:
         while self._wg_update_pending:
             self._wg_update_pending = False
             try:
-                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.network, csid=self.me.csid)
+                await sync_wg_peers("wg0", self.known_nodes, self.me.node_id, self.me.network, csid=self.me.csid, vrf=self.vrf)
                 peer_keys = self.known_nodes.keys() - {self.me.node_id}
                 if (gre_network := self.me.gre_network):
                     sync_direct_peers("gre-mesh", peer_keys, gre_network, self.me.network)
@@ -329,6 +334,7 @@ class MeshController:
         # B. Iteratively compare and merge peer records.
         for nid, recv_n in recv_dict.items():
             recv_content = [recv_n.get(k, '') for k in ('name', 'pubkey', 'endpoint')]
+            recv_external_ips = recv_n.get('external_ips', [])
             recv_seq = recv_n.get('seq_num', 0)
             recv_ts = recv_n.get('timestamp', 0)
 
@@ -338,7 +344,7 @@ class MeshController:
                 continue
 
             if nid not in self.known_nodes:
-                new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq, timestamp=recv_n.get('timestamp', 0))
+                new_node = Node(recv_n['node_id'], *recv_content, seq_num=recv_seq, timestamp=recv_n.get('timestamp', 0), external_ips=recv_external_ips)
                 self.known_nodes[nid] = new_node
                 topology_changed = True
                 continue
@@ -357,8 +363,8 @@ class MeshController:
                 logging.warning(f"Obliged amnesia seq {recv_seq} for node {nid} (source {origin_id}, "
                                 f"timestamp {time_diff}s newer)")
 
-            local_content = [local_n.name, local_n.pubkey, local_n.endpoint]
-            conflict = (recv_content != local_content)
+            local_content = [local_n.name, local_n.pubkey, local_n.endpoint, local_n.external_ips]
+            conflict = (recv_content + [recv_external_ips] != local_content)
 
             if conflict:
                 if seq_diff <= 0 or nid == my_id:
@@ -371,6 +377,7 @@ class MeshController:
                 else:
                     topology_changed = True
                     local_n.name, local_n.pubkey, local_n.endpoint = recv_content
+                    local_n.external_ips = recv_external_ips
                     local_n.timestamp = recv_ts
 
             if seq_diff <= -self.STALE_TOLERANCE:

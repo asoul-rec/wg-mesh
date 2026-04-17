@@ -36,8 +36,11 @@ async def run_async(cmd, timeout=None):
 
 def log_called_process_error(logger, e):
     msg = [str(e)]
-    if e.stdout:
-        msg.append(f"stdout: {e.stdout.decode()}")
-    if e.stderr:
-        msg.append(f"stderr: {e.stderr.decode()}")
+    try:
+        if (out := e.stdout.decode().strip()):
+            msg.append(f"stdout: {out!r}")
+        if (err := e.stderr.decode().strip()):
+            msg.append(f"stderr: {err!r}")
+    except Exception as e1:
+        msg.append(f"[Failed to get streams: {e1!r}]")
     logger(" ".join(msg))
