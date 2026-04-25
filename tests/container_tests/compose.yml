@@ -1,14 +1,15 @@
 name: wg_mesh_test
 services:
   node1:
-    build: .
+    build:
+      context: ../..
+      dockerfile: release/Dockerfile_dev
     cap_add:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ../src:/app/src:ro
       - ./runtime_conf/config1.json:/app/config.json
     networks:
       main:
@@ -20,14 +21,15 @@ services:
         interface_name: eth1
 
   node2:
-    build: .
+    build:
+      context: ../..
+      dockerfile: release/Dockerfile_dev
     cap_add:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ../src:/app/src:ro
       - ./runtime_conf/config2.json:/app/config.json
     networks:
       main:
@@ -36,14 +38,15 @@ services:
         ipv4_address: 172.20.124.2
 
   node3:
-    build: .
+    build:
+      context: ../..
+      dockerfile: release/Dockerfile_dev
     cap_add:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ../src:/app/src:ro
       - ./runtime_conf/config3.json:/app/config.json
     networks:
       main:
@@ -55,14 +58,15 @@ services:
         interface_name: eth1
 
   node4:
-    build: .
+    build:
+      context: ../..
+      dockerfile: release/Dockerfile_dev
     cap_add:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ../src:/app/src:ro
       - ./runtime_conf/config4.json:/app/config.json
     networks:
       main:
@@ -71,16 +75,17 @@ services:
         ipv4_address: 172.20.124.4
 
   node5:
-    build: .
+    build:
+      context: ../..
+      dockerfile: release/Dockerfile_dev
     cap_add:
       - NET_ADMIN
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ../src:/app/src:ro
       - ./runtime_conf/config5.json:/app/config.json
-    command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && exec python -m src.mesh --config /app/config.json -v'
+    command: sh -c 'echo "Node 5 sleeping for 5s to let meshes form..." && sleep 5 && exec python -m mesh --config /app/config.json -vv'
     networks:
       main:
         ipv4_address: 172.20.123.5

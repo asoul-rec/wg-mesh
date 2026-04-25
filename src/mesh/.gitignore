@@ -1,0 +1,10 @@
+*
+
+!/.gitignore
+!/*.py
+!/linux_net
+!/linux_net/*.py
+!/linux_net/seg6
+!/linux_net/seg6/*.py
+!/utils
+!/utils/*.py
