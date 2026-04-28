@@ -78,6 +78,7 @@ def setup_seg6_csid(
         )
         logging.debug(f"Creating nft srv6 table: {nft_rule}")
         run(["nft", "-f", "-"], input=nft_rule.encode())
+        run(["ip", "addr", "add", get_internal_ip(csid.locator_block_address, node_id, cidr="network"), "dev", ifname])
         run(["ip", "route", "add", "local", csid.get_node_function_address(node_id, cidr="network"), "encap", "seg6local",
              "action", "End", "flavors", "next-csid", "lblen", str(csid.lblen), "nflen", str(csid.nflen), "dev", "lo"])
         if tunnel6_ifname is not None:

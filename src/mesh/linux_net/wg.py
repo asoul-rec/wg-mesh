@@ -1,8 +1,7 @@
-import logging
-import subprocess
-import os
 import asyncio
 import copy
+import logging
+import subprocess
 from typing import Optional
 
 from ..utils.ip import get_internal_ip
@@ -29,32 +28,13 @@ def generate_wg_keys():
         return None, None
 
 
-def setup_wg_interface(iface_name: str, private_key: str, cidr: str, node_id: int, listen_port: int = 51820, csid: Optional[SRv6CSID]=None):
+def setup_wg_interface(iface_name: str, private_key: str, cidr: str, listen_port: int = 51820):
     """init wg interface, equivalent to wg-quick up"""
     try:
-        # 1. create wg interface (if already exists, ignore the error)
         run(["ip", "link", "add", "dev", iface_name, "type", "wireguard"], check=False)
-        # 2. bind private key and start listening
-        # For security reasons, wg does not accept private key directly from parameters
-        # Use /dev/shm to ensure the file is only in memory
-        key_path = f"/dev/shm/{iface_name}_priv"
-        try:
-            with open(key_path, "w") as f:
-                f.write(private_key + "\n")
-            os.chmod(key_path, 0o600)
-            run(["wg", "set", iface_name, "private-key", key_path, "listen-port", str(listen_port)])
-        finally:
-            try:
-                os.remove(key_path)
-            except OSError:
-                pass
-        # 3. set ip and bring up interface
+        run(["wg", "set", iface_name, "private-key", "/dev/stdin", "listen-port", str(listen_port)], input=private_key.encode())
         run(["ip", "address", "replace", cidr, "dev", iface_name])
         run(["ip", "link", "set", "up", "dev", iface_name])
-        if csid is not None:
-            run(["ip", "route", "add", csid.locator_block_address, "dev", iface_name])
-            csid_host = get_internal_ip(csid.locator_block_address, node_id, cidr="host")
-            run(["ip", "address", "add", csid_host, "dev", iface_name])
         logging.info(f"Interface {iface_name} setup successful with IP {cidr}")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to setup wireguard {iface_name}. {e} stdout: {e.output.decode()} stderr: {e.stderr.decode()}")

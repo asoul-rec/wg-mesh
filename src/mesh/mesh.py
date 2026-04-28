@@ -180,9 +180,9 @@ class MeshController:
         logging.info(f"Spinning up wg interface on {my_ip}")
         if not self.dry_run:
             self.vrf.up()
-            for ext_ip, dev in self.me.external_routes.items():
-                self.vrf.add_route(ext_ip, dev)
-            setup_wg_interface("wg0", self.me.private_key, my_cidr, self.me.node_id, csid=self.me.csid)
+            for ext_ip, options in self.me.external_routes.items():
+                self.vrf.add_route(ext_ip, options)
+            setup_wg_interface("wg0", self.me.private_key, my_cidr)
             self.trigger_wg_update()
             if self.me.csid is not None:
                 self.seg6_controller = Seg6Controller(self.me.csid)

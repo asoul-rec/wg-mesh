@@ -96,6 +96,7 @@ class VRFTable:
         :param route_options: Dictionary storing route details or None.
         """
         if route_options is None:
+            # special case for node internal networks
             self._try_run(
                 ["ip", "addr", "add", network_addr, "dev", self.ifname],
                 f"Failed to add address {network_addr} to {self.ifname}: ",
@@ -103,7 +104,7 @@ class VRFTable:
             )
             return
 
-        if dev := route_options.get("dev"):
+        if (dev := route_options.get("dev")) and not route_options.pop("_noenslave", False):
             self._try_run(
                 ["ip", "link", "set", "dev", dev, "master", self.ifname],
                 f"Failed to set {dev} master to {self.ifname}: ",
