@@ -4,6 +4,8 @@ RUN apk add --no-cache wireguard-tools-wg iproute2 nftables
 
 RUN apk add --no-cache tcpdump iputils conntrack-tools
 
+RUN pip install --no-cache-dir prometheus-client
+
 COPY ./src/mesh /app/mesh
 
 WORKDIR /app
