@@ -104,7 +104,7 @@ class VRFTable:
             )
             return
 
-        if (dev := route_options.get("dev")) and not route_options.pop("_noenslave", False):
+        if (dev := route_options.get("dev")) and not route_options.get("_noenslave", False):
             self._try_run(
                 ["ip", "link", "set", "dev", dev, "master", self.ifname],
                 f"Failed to set {dev} master to {self.ifname}: ",
@@ -112,7 +112,7 @@ class VRFTable:
             )
 
         cmd = ["ip", "route", "add", network_addr, "vrf", self.ifname]
-        cmd += itertools.chain.from_iterable(route_options.items())
+        cmd += itertools.chain.from_iterable([i for i in route_options.items() if not i[0].startswith("_")])
         self._try_run(
             cmd,
             f"Failed to add route {network_addr} to VRF {self.ifname}: ",
