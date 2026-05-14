@@ -6,14 +6,12 @@ handler — no web framework required.  All metric objects live on a dedicated
 
 Usage from the controller::
 
-    from .metrics import setup_metrics
-    server = setup_metrics(controller, port=9586)
+    from . import metrics
+    server = metrics.setup(controller, addr="127.0.0.1", port=9586)
     await server.start()   # non-blocking, runs on the event loop
     ...
     await server.stop()    # graceful shutdown
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
@@ -37,35 +35,35 @@ REGISTRY = CollectorRegistry()
 #  Event-driven counters — incremented at call sites in mesh.py
 # ---------------------------------------------------------------------------
 
-PACKETS_TOTAL = Counter(
+packets_total = Counter(
     "wgmesh_gossip_packets_total",
     "Total gossip packets sent or received.",
     ["type", "direction"],
     registry=REGISTRY,
 )
 
-PACKETS_DROPPED_TOTAL = Counter(
+packets_dropped_total = Counter(
     "wgmesh_gossip_packets_dropped_total",
     "Gossip packets dropped before processing.",
     ["reason"],
     registry=REGISTRY,
 )
 
-RELIABLE_SEND_TOTAL = Counter(
+reliable_send_total = Counter(
     "wgmesh_reliable_send_total",
     "Outcomes of reliable (retried) packet sends.",
     ["outcome"],
     registry=REGISTRY,
 )
 
-CONFIG_RELOADS_TOTAL = Counter(
+config_reloads_total = Counter(
     "wgmesh_config_reloads_total",
     "Number of config file reloads.",
     registry=REGISTRY,
 )
 
 # Packet type integer → human-readable name
-PKT_TYPE_NAMES: dict[int, str] = {1: "announce", 2: "ack", 3: "route_cost"}
+pkt_type_names: dict[int, str] = {1: "announce", 2: "ack", 3: "route_cost"}
 
 # ---------------------------------------------------------------------------
 #  Custom collector — reads live controller state on each scrape
@@ -132,11 +130,10 @@ class MeshCollector:
 
         # Route table size
         if ctrl.seg6_controller is not None:
-            rt_size = len(getattr(ctrl.seg6_controller, "_route_table", {}))
             yield GaugeMetricFamily(
                 "wgmesh_route_table_entries",
                 "Number of SRv6 route table entries.",
-                value=rt_size,
+                value=ctrl.seg6_controller.route_table_size,
             )
 
         # -- per-peer gauges -------------------------------------------------
@@ -174,22 +171,23 @@ class MeshCollector:
 class MetricsServer:
     """Minimal async HTTP server that serves the ``/metrics`` endpoint."""
 
-    def __init__(self, port: int, registry: CollectorRegistry) -> None:
+    def __init__(self, addr: str, port: int, registry: CollectorRegistry) -> None:
+        self._addr = addr
         self._port = port
         self._registry = registry
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
-        if self._port == 0:
-            logger.info("Metrics endpoint disabled (port=0)")
+        if not self._addr or self._port == 0:
+            logger.info("Metrics endpoint disabled")
             return
         try:
             self._server = await asyncio.start_server(
-                self._handle, "0.0.0.0", self._port,
+                self._handle, self._addr, self._port,
             )
-            logger.info(f"Metrics endpoint listening on :{self._port}/metrics")
+            logger.info(f"Metrics endpoint listening on {self._addr}:{self._port}/metrics")
         except OSError as e:
-            logger.warning(f"Failed to start metrics server on port {self._port}: {e}")
+            logger.warning(f"Failed to start metrics server on {self._addr}:{self._port}: {e}")
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -229,8 +227,8 @@ class MetricsServer:
 # ---------------------------------------------------------------------------
 
 
-def setup_metrics(controller: MeshController, port: int = 9586) -> MetricsServer:
+def setup(controller: MeshController, addr: str, port: int) -> MetricsServer:
     """Register the live-state collector and return a ready-to-start server."""
     collector = MeshCollector(controller)
     REGISTRY.register(collector)
-    return MetricsServer(port, REGISTRY)
+    return MetricsServer(addr, port, REGISTRY)

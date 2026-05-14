@@ -28,3 +28,7 @@ class Seg6Controller:
             kwargs = {"add": route_table}
         sync_seg6_routes(self.csid, **kwargs, flush=flush)
         self._route_table_cache = route_table
+
+    @property
+    def route_table_size(self) -> int:
+        return len(self._route_table_cache)
