@@ -115,7 +115,7 @@ class MeshController:
     def load_conf(self):
         self.me, self.known_nodes = load_conf(self.config_file)
         self.save_conf()
-        metrics.config_reloads_total.inc()
+        self.metrics_server.config_reloads_total.inc()
         logging.info(f"Loaded {len(self.known_nodes)} nodes (including self) from {self.config_file}")
 
     def save_conf(self):
@@ -271,10 +271,10 @@ class MeshController:
             pkt = MeshPacket.unpack(data, self.me.pubkey)
             pkt_type, origin_id, seq_num, pkt_tag, payload = pkt["pkt_type"], pkt["origin_id"], pkt["seq_num"], pkt["pkt_tag"], pkt["payload"]
         except MeshPacket.Error as e:
-            metrics.packets_dropped_total.labels(reason="decrypt_fail").inc()
+            self.metrics_server.packets_dropped_total.labels(reason="decrypt_fail").inc()
             logging.warning(f"Failed to unpack packet from {sender_ip}: {e}")
             return
-        metrics.packets_total.labels(type=metrics.pkt_type_names.get(pkt_type, str(pkt_type)), direction="received").inc()
+        self.metrics_server.packets_total.labels(type=metrics.pkt_type_names.get(pkt_type, str(pkt_type)), direction="received").inc()
         try:
             self.daemons["online_monitor"].online_event.set()
         except KeyError:
@@ -314,7 +314,7 @@ class MeshController:
         # 1. Flood Control: Drop replayed or slightly older packets (-STALE_TOLERANCE, 0].
         # However, we allow extremely old packets to pass (they represent node amnesia recovery).
         if -self.STALE_TOLERANCE < diff(origin_id, seq_num) <= 0:
-            metrics.packets_dropped_total.labels(reason="stale").inc()
+            self.metrics_server.packets_dropped_total.labels(reason="stale").inc()
             logging.debug(f"Dropping stale announce")
             self.send_ack(sender_ip, origin_id, seq_num, pkt_tag)
             return
@@ -324,7 +324,7 @@ class MeshController:
             payload_data = json.loads(uncompressed.decode('utf-8'))
             recv_network = payload_data["network"]
             if recv_network and recv_network != self.me.network:
-                metrics.packets_dropped_total.labels(reason="network_mismatch").inc()
+                self.metrics_server.packets_dropped_total.labels(reason="network_mismatch").inc()
                 logging.warning(f"Dropping announce from {sender_ip}: mismatched network ({recv_network} != {self.me.network})")
                 return
             recv_dict = {n['node_id']: n for n in payload_data["nodes"]}
@@ -454,7 +454,7 @@ class MeshController:
     def send_packet(self, target_ip, pkt_type, origin_id, seq_num, pkt_tag, payload, *, target_key):
         if not self.transport:
             return
-        metrics.packets_total.labels(type=metrics.pkt_type_names.get(pkt_type, str(pkt_type)), direction="sent").inc()
+        self.metrics_server.packets_total.labels(type=metrics.pkt_type_names.get(pkt_type, str(pkt_type)), direction="sent").inc()
         packet = MeshPacket.pack(pkt_type, origin_id, seq_num, pkt_tag, payload, target_key=target_key)
         logging.debug(f"Sending packet to [{target_ip}:{self.MESH_UDP_LISTEN_PORT}], "
                       f"type: {pkt_type}, origin_id: {origin_id}, seq_num: {seq_num}, tag: {pkt_tag}")
@@ -566,16 +566,16 @@ class MeshController:
                 try:
                     recv_tag, recv_time = await asyncio.wait_for(ack_queue.get(), timeout=3.0)
                     if recv_tag == attempt:
-                        metrics.reliable_send_total.labels(outcome="ack_received").inc()
+                        self.metrics_server.reliable_send_total.labels(outcome="ack_received").inc()
                         logging.debug(f"ACK received for {task_key}, pkt_tag={recv_tag}")
                         if target_nid in self.known_nodes:
                             self.known_nodes[target_nid].record_traffic_stat((start_time, round((recv_time - start_time) * 1000)))
                     else:
-                        metrics.reliable_send_total.labels(outcome="stale_ack").inc()
+                        self.metrics_server.reliable_send_total.labels(outcome="stale_ack").inc()
                         logging.debug(f"Stale ACK received for {task_key}, expected tag {attempt}, got {recv_tag}. Aborting further retries.")
                     return
                 except asyncio.TimeoutError:
-                    metrics.reliable_send_total.labels(outcome="timeout").inc()
+                    self.metrics_server.reliable_send_total.labels(outcome="timeout").inc()
                     logging.debug(f"Timeout waiting for ACK {task_key}, attempt {attempt + 1}/3")
                     if target_nid in self.known_nodes:
                         self.known_nodes[target_nid].record_traffic_stat((start_time, -1))

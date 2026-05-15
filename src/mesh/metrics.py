@@ -1,8 +1,13 @@
 """Prometheus metrics endpoint for the wg-mesh controller.
 
 Exposes ``/metrics`` over HTTP using a lightweight ``asyncio.start_server``
-handler — no web framework required.  All metric objects live on a dedicated
-``CollectorRegistry`` so they never collide with the default process metrics.
+handler — no web framework required.  Each ``MetricsServer`` owns its own
+``CollectorRegistry`` and counters, so multiple controller instances never
+share mutable state.
+
+The ``prometheus_client`` library is imported lazily — if it is not installed,
+``setup()`` returns a no-op stub and the controller operates without
+observability.
 
 Usage from the controller::
 
@@ -13,57 +18,32 @@ Usage from the controller::
     await server.stop()    # graceful shutdown
 """
 
+from abc import ABC, abstractmethod
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
-from prometheus_client import Counter, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_client.core import GaugeMetricFamily
 
 if TYPE_CHECKING:
     from .mesh import MeshController
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-#  Registry — isolated from the default process-level registry
-# ---------------------------------------------------------------------------
-
-REGISTRY = CollectorRegistry()
-
-# ---------------------------------------------------------------------------
-#  Event-driven counters — incremented at call sites in mesh.py
-# ---------------------------------------------------------------------------
-
-packets_total = Counter(
-    "wgmesh_gossip_packets_total",
-    "Total gossip packets sent or received.",
-    ["type", "direction"],
-    registry=REGISTRY,
-)
-
-packets_dropped_total = Counter(
-    "wgmesh_gossip_packets_dropped_total",
-    "Gossip packets dropped before processing.",
-    ["reason"],
-    registry=REGISTRY,
-)
-
-reliable_send_total = Counter(
-    "wgmesh_reliable_send_total",
-    "Outcomes of reliable (retried) packet sends.",
-    ["outcome"],
-    registry=REGISTRY,
-)
-
-config_reloads_total = Counter(
-    "wgmesh_config_reloads_total",
-    "Number of config file reloads.",
-    registry=REGISTRY,
-)
-
-# Packet type integer → human-readable name
 pkt_type_names: dict[int, str] = {1: "announce", 2: "ack", 3: "route_cost"}
+
+
+class CounterProtocol(Protocol):
+    def labels(self, *args: Any, **kwargs: Any) -> CounterProtocol: ...
+    def inc(self, amount=1, exemplar: dict = None) -> None: ...
+
+
+class BaseCounter:
+    def labels(self, *_, **__):
+        return self
+
+    def inc(self, *_, **__):
+        pass
+
 
 # ---------------------------------------------------------------------------
 #  Custom collector — reads live controller state on each scrape
@@ -73,19 +53,21 @@ pkt_type_names: dict[int, str] = {1: "announce", 2: "ack", 3: "route_cost"}
 class MeshCollector:
     """Yields per-scrape gauge families from live ``MeshController`` state.
 
-    Using a custom collector (rather than module-level ``Gauge`` objects) means
+    Using a custom collector (rather than persistent ``Gauge`` objects) means
     departed peers automatically disappear from the output — no explicit
     ``.remove()`` cleanup required.
     """
 
     def __init__(self, controller: MeshController) -> None:
-        self._ctrl = controller
+        self.controller = controller
 
     def describe(self):
         return []
 
     def collect(self):
-        ctrl = self._ctrl
+        from prometheus_client.core import GaugeMetricFamily
+
+        ctrl = self.controller
 
         # -- scalar gauges ---------------------------------------------------
         from ._version import VERSION_STR
@@ -164,32 +146,75 @@ class MeshCollector:
 
 
 # ---------------------------------------------------------------------------
-#  Async HTTP server — serves /metrics
+#  Async HTTP server — serves /metrics, owns registry and counters
 # ---------------------------------------------------------------------------
 
 
-class MetricsServer:
+class Server(ABC):
+    packets_total: CounterProtocol
+    packets_dropped_total: CounterProtocol
+    reliable_send_total: CounterProtocol
+    config_reloads_total: CounterProtocol
+
+    @abstractmethod
+    async def start(self) -> None:
+        pass
+
+    @abstractmethod
+    async def stop(self) -> None:
+        pass
+
+class PrometheusMetricsServer(Server):
     """Minimal async HTTP server that serves the ``/metrics`` endpoint."""
 
-    def __init__(self, addr: str, port: int, registry: CollectorRegistry) -> None:
-        self._addr = addr
-        self._port = port
-        self._registry = registry
-        self._server: asyncio.Server | None = None
+    def __init__(self, addr: str, port: int, controller: MeshController) -> None:
+        from prometheus_client import Counter, CollectorRegistry
+
+        self.addr = addr
+        self.port = port
+        self.server: asyncio.Server | None = None
+
+        # Per-instance registry and counters
+        self.registry = CollectorRegistry()
+        self.collector = MeshCollector(controller)
+        self.registry.register(self.collector)
+
+        self.packets_total = Counter(
+            "wgmesh_gossip_packets_total",
+            "Total gossip packets sent or received.",
+            ["type", "direction"],
+            registry=self.registry,
+        )
+        self.packets_dropped_total = Counter(
+            "wgmesh_gossip_packets_dropped_total",
+            "Gossip packets dropped before processing.",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.reliable_send_total = Counter(
+            "wgmesh_reliable_send_total",
+            "Outcomes of reliable (retried) packet sends.",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.config_reloads_total = Counter(
+            "wgmesh_config_reloads_total",
+            "Number of config file reloads.",
+            registry=self.registry,
+        )
 
     async def start(self) -> None:
-        if not self._addr or self._port == 0:
-            logger.info("Metrics endpoint disabled")
-            return
         try:
-            self._server = await asyncio.start_server(
-                self._handle, self._addr, self._port,
+            self.server = await asyncio.start_server(
+                self._handle, self.addr, self.port,
             )
-            logger.info(f"Metrics endpoint listening on {self._addr}:{self._port}/metrics")
+            logger.info(f"Metrics endpoint listening on {self.addr}:{self.port}/metrics")
         except OSError as e:
-            logger.warning(f"Failed to start metrics server on {self._addr}:{self._port}: {e}")
+            logger.warning(f"Failed to start metrics server on {self.addr}:{self.port}: {e!r}")
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
         try:
             request_line = await reader.readline()
             # Consume remaining headers
@@ -199,7 +224,7 @@ class MetricsServer:
                     break
 
             if request_line.startswith(b"GET /metrics"):
-                body = generate_latest(self._registry)
+                body = generate_latest(self.registry)
                 header = (
                     f"HTTP/1.1 200 OK\r\n"
                     f"Content-Type: {CONTENT_TYPE_LATEST}\r\n"
@@ -210,25 +235,53 @@ class MetricsServer:
             else:
                 writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             await writer.drain()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to handle metrics request: {e!r}")
         finally:
             writer.close()
             await writer.wait_closed()
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        if self.server is not None:
+            self.server.close()
+            await self.server.wait_closed()
 
+
+# ---------------------------------------------------------------------------
+#  No-op stub — same interface as MetricsServer but does nothing
+# ---------------------------------------------------------------------------
+
+_NOOP = BaseCounter()
+
+
+class _NoOpServer(Server):
+    """Stub returned when prometheus_client is not installed."""
+
+    packets_total = _NOOP
+    packets_dropped_total = _NOOP
+    reliable_send_total = _NOOP
+    config_reloads_total = _NOOP
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+_NOOP_SERVER = _NoOpServer()
 
 # ---------------------------------------------------------------------------
 #  Setup helper
 # ---------------------------------------------------------------------------
 
 
-def setup(controller: MeshController, addr: str, port: int) -> MetricsServer:
-    """Register the live-state collector and return a ready-to-start server."""
-    collector = MeshCollector(controller)
-    REGISTRY.register(collector)
-    return MetricsServer(addr, port, REGISTRY)
+def setup(controller: MeshController, addr: str, port: int) -> Server:
+    """Create and return a metrics server (or a no-op stub if prometheus_client is missing)."""
+    try:
+        if not addr or port == 0:
+            logger.info("Metrics endpoint disabled")
+            return _NOOP_SERVER
+        return PrometheusMetricsServer(addr, port, controller)
+    except ImportError:
+        logger.warning("Required to start metrics server, but Prometheus client library not installed. Metrics will be disabled.")
+        return _NOOP_SERVER
