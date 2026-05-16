@@ -89,10 +89,9 @@ class MeshController:
     known_nodes: dict[int, Node]
     daemons: dict[str, Daemon]
 
-    def __init__(self, config_file, dry_run=False, *, metrics_addr='', metrics_port=0):
+    def __init__(self, config_file, dry_run=False):
         self.config_file = config_file
         self.dry_run = dry_run
-        self.metrics_server = metrics.setup(self, addr=metrics_addr, port=metrics_port)
         self.known_nodes = {}
         self.me = None
         self.transport = None
@@ -106,6 +105,17 @@ class MeshController:
         self._background_tasks = set()
         # Prepare daemons based on config
         self.load_conf()
+        self.metrics_server = None
+        if self.me.metrics_endpoint:
+            try:
+                addr, port = self.me.metrics_endpoint.rsplit(':', 1)
+                port = int(port)
+            except Exception as e:
+                logging.warning(f"Failed to parse metrics endpoint {self.me.metrics_endpoint!r}: {e!r}")
+            else:
+                self.metrics_server = metrics.setup(self, addr=addr, port=port)
+        if self.metrics_server is None:
+            self.metrics_server = metrics.setup(self, '', 0)
         self.daemons = {}
         self._add_online_monitor()
         self._add_keepalive()
@@ -115,7 +125,6 @@ class MeshController:
     def load_conf(self):
         self.me, self.known_nodes = load_conf(self.config_file)
         self.save_conf()
-        self.metrics_server.config_reloads_total.inc()
         logging.info(f"Loaded {len(self.known_nodes)} nodes (including self) from {self.config_file}")
 
     def save_conf(self):

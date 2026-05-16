@@ -79,6 +79,7 @@ class LocalNode:
     vxlan_network: str = ""
     external_routes: dict[str, Optional[dict[str, str]]] = field(default_factory=dict)
     csid: Optional[SRv6CSID] = None
+    metrics_endpoint: str = ""
     _initialized = False
 
     def __post_init__(self):
@@ -108,6 +109,8 @@ class LocalNode:
             d["external_routes"] = self.external_routes
         if self.csid is not None:
             d["srv6"] = {"flavor": "next-csid", **self.csid.to_dict()}
+        if self.metrics_endpoint:
+            d["metrics_endpoint"] = self.metrics_endpoint
         return d
 
 
@@ -128,6 +131,7 @@ def load_conf(config_file):
     gre_network_str = me_cfg.get("gre_network", "")
     vxlan_network_str = me_cfg.get("vxlan_network", "")
     srv6_settings = me_cfg.get("srv6")
+    metrics_endpoint = me_cfg.get("metrics_endpoint", "")
     private_key = me_cfg.get("private_key", "")
     my_pubkey = me_cfg.get("public_key", "")
 
@@ -163,7 +167,8 @@ def load_conf(config_file):
         gre_network=gre_network_str,
         vxlan_network=vxlan_network_str,
         external_routes=me_cfg.get("external_routes", {}),
-        csid=csid
+        csid=csid,
+        metrics_endpoint=metrics_endpoint
     )
 
     known_nodes = {}
@@ -198,7 +203,8 @@ def save_conf(config_file, me, known_nodes):
         # reorder keys
         for key in [
             "id", "name", "private_key", "public_key", "endpoint", "network",
-            "srv6", "gre_network", "vxlan_network", "external_routes", "route_cost", "seq_num", "timestamp"
+            "srv6", "gre_network", "vxlan_network", "external_routes", "metrics_endpoint",
+            "route_cost", "seq_num", "timestamp"
         ]:
             if key in me_dict:
                 me_dict[key] = me_dict.pop(key)

@@ -154,7 +154,6 @@ class Server(ABC):
     packets_total: CounterProtocol
     packets_dropped_total: CounterProtocol
     reliable_send_total: CounterProtocol
-    config_reloads_total: CounterProtocol
 
     @abstractmethod
     async def start(self) -> None:
@@ -195,11 +194,6 @@ class PrometheusMetricsServer(Server):
             "wgmesh_reliable_send_total",
             "Outcomes of reliable (retried) packet sends.",
             ["outcome"],
-            registry=self.registry,
-        )
-        self.config_reloads_total = Counter(
-            "wgmesh_config_reloads_total",
-            "Number of config file reloads.",
             registry=self.registry,
         )
 
@@ -260,7 +254,6 @@ class _NoOpServer(Server):
     packets_total = _NOOP
     packets_dropped_total = _NOOP
     reliable_send_total = _NOOP
-    config_reloads_total = _NOOP
 
     async def start(self):
         pass
