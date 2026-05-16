@@ -1,0 +1,34 @@
+{
+	"name": "wg-mesh DevContainer",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"remoteUser": "root",
+	"containerEnv": {
+		"TZ": "America/Chicago"
+	},
+	"remoteEnv": {
+		"TZ": "America/Chicago"
+	},
+	"mounts": [
+		"source=claude-code-config-${devcontainerId},target=/root/.claude,type=volume",
+		"source=claude-code-history-${devcontainerId},target=/commandhistory,type=volume"
+	],
+	"postCreateCommand": "export PATH=/home/dev/.local/bin:$PATH && rm -rf .venv && uv venv && uv sync --group test",
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "fish",
+				"terminal.integrated.profiles.linux": {
+					"fish": {
+						"path": "/usr/bin/fish"
+					}
+				}
+			},
+			"extensions": [
+				"ms-python.python",
+				"bmalehorn.vscode-fish"
+			]
+		}
+	}
+}

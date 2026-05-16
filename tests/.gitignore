@@ -1,8 +1,3 @@
-*
-
-!/.gitignore
-!/container_tests
-!/container_tests/Dockerfile
-!/container_tests/compose.yml
-!/container_tests/conf
-!/container_tests/conf/*
+__pycache__/
+*.pyc
+container_tests/runtime_conf/

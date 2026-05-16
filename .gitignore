@@ -13,3 +13,6 @@
 !/src
 !/src/mesh
 !/tests
+!/.devcontainer
+!/.github
+!/justfile
