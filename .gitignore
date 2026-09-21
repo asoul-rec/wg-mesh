@@ -13,3 +13,5 @@
 !/src
 !/src/mesh
 !/tests
+!/.github/
+!/.github/**
