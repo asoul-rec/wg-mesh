@@ -4,13 +4,14 @@ import random
 
 from .utils.algorithm import compute_shortest_paths
 
-
 __all__ = [
     "Daemon",
-    "OnlineMonitor",
     "KeepAlive",
+    "OnlineMonitor",
     "Routing",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 class Daemon:
@@ -23,11 +24,11 @@ class Daemon:
             try:
                 self._task = None
                 if t.cancelled() or (e := t.exception()) is None:
-                    logging.info(f"{self._name} loop terminated.")
+                    logger.info(f"{self._name} loop terminated.")
                 else:
-                    logging.warning(f"{self._name} loop failed: {e!r}")
+                    logger.warning(f"{self._name} loop failed: {e!r}")
             except BaseException as e:
-                logging.error(f"Error in {self._name} loop done callback: {e!r}")
+                logger.error(f"Error in {self._name} loop done callback: {e!r}")
                 raise
 
         if self._task is None:
@@ -39,7 +40,7 @@ class Daemon:
             self._task.cancel()
 
     async def run(self):
-        logging.info(f"{self._name} loop started")
+        logger.info(f"{self._name} loop started")
         while True:
             await self._loop()
 
@@ -66,12 +67,12 @@ class OnlineMonitor(Daemon):
         try:
             await asyncio.wait_for(self.online_event.wait(), timeout=self.timeout)
             if self.is_offline:
-                logging.info("Node is back online.")
+                logger.info("Node is back online.")
                 self.is_offline = False
                 self.online_callback()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if not self.is_offline:
-                logging.warning(f"Connection lost! ({self.timeout}s without packets)")
+                logger.warning(f"Connection lost! ({self.timeout}s without packets)")
                 self.is_offline = True
                 self.offline_callback()
 
@@ -89,8 +90,8 @@ class KeepAlive(Daemon):
         interval = random.uniform(*self.keepalive_interval)
         try:
             await asyncio.wait_for(self.keepalive_event.wait(), timeout=interval)
-        except asyncio.TimeoutError:
-            logging.debug(f"Keepalive ({interval:.3f}s) firing broadcast")
+        except TimeoutError:
+            logger.debug(f"Keepalive ({interval:.3f}s) firing broadcast")
             self.callback()
 
 
@@ -108,13 +109,13 @@ class Routing(Daemon):
         try:
             await asyncio.sleep(3)
             await asyncio.wait_for(self.update_event.wait(), timeout=60.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         link_state = self.link_state_callback()
         route_table, distances = compute_shortest_paths(link_state, self.me_id)
         if route_table:
-            logging.debug(f"Update routing {route_table=}, {distances=}")
+            logger.debug(f"Update routing {route_table=}, {distances=}")
             try:
                 self.sync_route_callback(route_table)
-            except Exception as e:
-                logging.warning(f"Failed to sync routes: {e!r}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to sync routes: {e!r}")

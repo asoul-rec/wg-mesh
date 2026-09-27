@@ -1,5 +1,5 @@
-from .operations import setup_seg6_csid, sync_seg6_routes
 from .csid import SRv6CSID
+from .operations import setup_seg6_csid, sync_seg6_routes
 
 
 class Seg6Controller:
@@ -26,7 +26,7 @@ class Seg6Controller:
             }
         else:
             kwargs = {"add": route_table}
-        sync_seg6_routes(self.csid, **kwargs, flush=flush)
+        sync_seg6_routes(self.csid, **kwargs, flush=flush)  # ty: ignore[invalid-argument-type]
         self._route_table_cache = route_table
 
     @property

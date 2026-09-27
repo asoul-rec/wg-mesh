@@ -1,7 +1,8 @@
+import argparse
 import asyncio
 import logging
+
 from . import mesh
-import argparse
 
 parser = argparse.ArgumentParser(description="P2P WG Mesh Controller")
 parser.add_argument("--config", type=str, default="config.json", help="Path to config file")

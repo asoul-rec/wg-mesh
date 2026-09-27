@@ -12,4 +12,4 @@ WORKDIR /app
 
 CMD ["python", "-m", "mesh", "--config", "/app/config.json", "-vv"]
 
-ENV PYTHONASYNCIODEBUG 1
+ENV PYTHONASYNCIODEBUG=1

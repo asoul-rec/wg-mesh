@@ -1,19 +1,22 @@
 import ipaddress
 import logging
+import typing
 from subprocess import CalledProcessError
-from typing import Optional, Union, Literal
+from typing import Literal
 
 from ...utils.ip import get_internal_ip
-from ..proc import run, log_called_process_error
+from ..proc import log_called_process_error, run
 from ..vrf import VRFTable
 from .csid import SRv6CSID
+
+logger = logging.getLogger(__name__.rsplit(".", 1)[0])
 
 
 def setup_seg6_csid(
     node_id: int, ifname: str, *,
     csid: SRv6CSID,
-    vrf_table: Union[VRFTable, int] = -1,
-    tunnel6_ifname: Optional[str] = None,
+    vrf_table: VRFTable | int = -1,
+    tunnel6_ifname: str | None = None,
     decapsulation_mode: Literal["DT46", "ip6tnl"] = "ip6tnl"
 ):
     """
@@ -76,7 +79,7 @@ def setup_seg6_csid(
             node_mask=ipaddress.ip_network(csid.get_node_function_address(node_id, cidr="network")).hostmask,
             local_addr=get_internal_ip(csid.locator_block_address, node_id)
         )
-        logging.debug(f"Creating nft srv6 table: {nft_rule}")
+        logger.debug(f"Creating nft srv6 table: {nft_rule}")
         run(["nft", "-f", "-"], input=nft_rule.encode())
         run(["ip", "addr", "add", get_internal_ip(csid.locator_block_address, node_id, cidr="network"), "dev", ifname])
         run(["ip", "route", "add", "local", csid.get_node_function_address(node_id, cidr="network"), "encap", "seg6local",
@@ -87,30 +90,31 @@ def setup_seg6_csid(
             run(["ip", "link", "set", tunnel6_ifname, "up"])
             run(["ip", "addr", "add", csid.get_node_function_address(node_id, cidr="host"), "dev", "lo"])
         if has_vrf:
+            vrf_table = typing.cast(VRFTable, vrf_table)
             vrf_table.up()
             if decapsulation_mode == "ip6tnl":
                 if tunnel6_ifname is not None:
                     run(["ip", "link", "set", tunnel6_ifname, "master", str(vrf_table.ifname)])
                 else:
-                    logging.warning("ip6tnl decapsulation mode requires a external tunnel6 interface for VRF binding.")
+                    logger.warning("ip6tnl decapsulation mode requires a external tunnel6 interface for VRF binding.")
             elif decapsulation_mode == "DT46":
                 run(["ip", "route", "add", "local", csid.get_node_function_address(node_id, cidr="host"), "encap", "seg6local",
                      "action", "End.DT46", "vrftable", str(vrf_table.table_id), "dev", "lo"])
         else:
             if decapsulation_mode == "DT46":
-                logging.warning("DT46 decapsulation mode requires a VRF table.")
+                logger.warning("DT46 decapsulation mode requires a VRF table.")
     except CalledProcessError as e:
-        log_called_process_error(logging.warning, e)
-    except Exception as e:
-        logging.warning(f"Failed to setup SRv6 CSID: {e!r}")
+        log_called_process_error(logger.warning, e)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to setup SRv6 CSID: {e!r}")
     else:
-        logging.info(f"SRv6 CSID setup successfully")
+        logger.info("SRv6 CSID setup successfully")
 
 def sync_seg6_routes(
     csid: SRv6CSID, *,
-    add: dict[int, list[int]] = None,
-    replace: dict[int, list[int]] = None,
-    delete: set[int] = None,
+    add: dict[int, list[int]] | None = None,
+    replace: dict[int, list[int]] | None = None,
+    delete: set[int] | None = None,
     flush: bool = False
 ):
     try:
@@ -132,11 +136,11 @@ def sync_seg6_routes(
         if not nft_commands:
             return
         nft_commands_str = "\n".join(nft_commands)
-        logging.debug(f"Updating nftables map:\n{nft_commands_str}")
+        logger.debug(f"Updating nftables map:\n{nft_commands_str}")
         run(["nft", "-f", "-"], input=nft_commands_str.encode())
     except CalledProcessError as e:
-        log_called_process_error(logging.warning, e)
-    except Exception as e:
-        logging.warning(f"Failed to sync SRv6 routes: {e!r}")
+        log_called_process_error(logger.warning, e)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to sync SRv6 routes: {e!r}")
     else:
-        logging.info(f"SRv6 routes synced successfully")
+        logger.info("SRv6 routes synced successfully")

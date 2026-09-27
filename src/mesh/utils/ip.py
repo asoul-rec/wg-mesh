@@ -1,6 +1,5 @@
 import ipaddress
-from typing import Optional, Literal
-
+from typing import Literal
 
 __all__ = [
     "get_internal_ip",
@@ -8,7 +7,7 @@ __all__ = [
 ]
 
 
-def get_internal_ip(network_addr, node_id, *, cidr: Optional[Literal["network", "host"]]=None):
+def get_internal_ip(network_addr, node_id, *, cidr: Literal["network", "host"] | None = None) -> str:
     network = ipaddress.ip_network(network_addr, strict=True)
     if cidr is None:
         return str(network[node_id])

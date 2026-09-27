@@ -1,4 +1,5 @@
 import ipaddress
+from typing import Literal, overload
 
 
 class SRv6CSID:
@@ -8,9 +9,19 @@ class SRv6CSID:
     This abstracts away the bitwise manipulations required to construct Locator Blocks
     and Node Function addresses for segment routing over IPv6.
     """
+    _lblen: int
+    _nflen: int
+    _locator_block: int
+    _locator_block_address: str
 
-    def __init__(self, *, nflen: int, locator_block: int = None, lblen: int = None,
-                 locator_block_address: str = None):
+    @overload
+    def __init__(self, *, nflen: int, locator_block: int, lblen: int, locator_block_address: None = None) -> None: ...
+
+    @overload
+    def __init__(self, *, nflen: int, locator_block: None = None, lblen: None = None, locator_block_address: str) -> None: ...
+
+    def __init__(self, *, nflen: int, locator_block: int | None = None, lblen: int | None = None,
+                 locator_block_address: str | None = None) -> None:
         """
         Initialize the SRv6 CSID geometry. Accepts either a combination of ``locator_block`` and ``lblen``,
         or a CIDR-style ``locator_block_address``.
@@ -22,14 +33,15 @@ class SRv6CSID:
                                       e.g. 'fd00::/8'. Overrides locator_block and lblen.
         :raises ValueError: If the provided bit lengths are invalid, unaligned, or incompatible.
         """
-        if (locator_block is None or lblen is None) and locator_block_address is None:
-            raise ValueError("Must provide either locator_block and lblen, or locator_block_address.")
         if locator_block_address is not None:
             if not (locator_block is None and lblen is None):
                 raise ValueError("Must provide either locator_block and lblen, or locator_block_address.")
             locator_addr = ipaddress.IPv6Network(locator_block_address)
             lblen = locator_addr.prefixlen
             locator_block = int(locator_addr.network_address) >> (128 - lblen)
+        elif locator_block is None or lblen is None:
+            raise ValueError("Must provide either locator_block and lblen, or locator_block_address.")
+
         if lblen < 0 or nflen < 0 or lblen + nflen > 128 or lblen & 7 or nflen & 7:
             raise ValueError(f"Invalid lblen or nflen: {lblen}, {nflen}. "
                              "Must be non-negative, sum <= 128, and both divisible by 8.")
@@ -41,18 +53,18 @@ class SRv6CSID:
         self._locator_block_address = str(ipaddress.IPv6Network((locator_block << (128 - lblen), lblen)))
 
     @property
-    def locator_block_address(self):
+    def locator_block_address(self) -> str:
         return self._locator_block_address
 
     @property
-    def lblen(self):
+    def lblen(self) -> int:
         return self._lblen
 
     @property
-    def nflen(self):
+    def nflen(self) -> int:
         return self._nflen
 
-    def get_node_function_address(self, node_function_id: int, *, cidr: Optional[Literal["network", "host"]]=None):
+    def get_node_function_address(self, node_function_id: int, *, cidr: Literal["network", "host"] | None = None) -> str:
         """
         Construct a CSID-assigned IPv6 address for a specific Node Function ID.
 
@@ -76,7 +88,7 @@ class SRv6CSID:
         else:
             raise ValueError(f"Unknown cidr type: {cidr!r}")
 
-    def get_srv6_address(self, hops_id: list[int]):
+    def get_srv6_address(self, hops_id: list[int]) -> str:
         """
         Build a full SRv6 destination address encoding a list of NEXT-CSID hops.
 
@@ -98,7 +110,8 @@ class SRv6CSID:
         addr_int <<= padding
         return str(ipaddress.IPv6Address(addr_int))
 
-    def to_dict(self, locator_block: Literal["address", "block"] = "address"):
+    def to_dict(self, locator_block: Literal["address", "block"] = "address") -> dict[str, int | str]:
+        d: dict[str, int | str]
         match locator_block:
             case "address":
                 d = {"locator_block_address": self._locator_block_address}

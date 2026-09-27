@@ -10,3 +10,9 @@ dependencies = []
 observability = [
     "prometheus-client>=0.25.0",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["FURB136"]

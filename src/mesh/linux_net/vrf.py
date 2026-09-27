@@ -1,9 +1,10 @@
 import itertools
 import logging
 from subprocess import CalledProcessError
-from typing import Optional
 
-from .proc import run, log_called_process_error
+from .proc import log_called_process_error, run
+
+logger = logging.getLogger(__name__)
 
 
 class VRFTable:
@@ -14,7 +15,7 @@ class VRFTable:
     ``iproute2`` commands. It keeps track of the interface state (up/down).
     """
 
-    def __init__(self, table_id: int, ifname: Optional[str] = None):
+    def __init__(self, table_id: int, ifname: str | None = None):
         """
         Initialize the VRFTable controller.
 
@@ -30,15 +31,15 @@ class VRFTable:
             self.ifname = ifname
 
     @staticmethod
-    def _try_run(cmd, msg_fail, msg_success):
+    def _try_run(cmd, msg_fail, msg_success) -> bool:
         try:
             run(cmd)
         except CalledProcessError as e:
-            log_called_process_error(logging.warning, e)
-        except Exception as e:
-            logging.warning(msg_fail + repr(e))
+            log_called_process_error(logger.warning, e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(msg_fail + repr(e))
         else:
-            logging.info(msg_success)
+            logger.info(msg_success)
             return True
         return False
 
@@ -88,7 +89,7 @@ class VRFTable:
             if success:
                 self.state = "down"
 
-    def add_route(self, network_addr: str, route_options: Optional[dict]):
+    def add_route(self, network_addr: str, route_options: dict | None) -> None:
         """
         Add a route to the VRF routing table.
 
@@ -119,7 +120,7 @@ class VRFTable:
             f"Route {network_addr} added to VRF {self.ifname}"
         )
 
-    def add_encap_route(self, network_addr: str, encap_dst: str, dev: str):
+    def add_encap_route(self, network_addr: str, encap_dst: str, dev: str) -> None:
         """
         Add an IPv6 encapsulated route to the VRF routing table.
 
@@ -133,7 +134,7 @@ class VRFTable:
             f"Encap route {network_addr} added to VRF interface {self.ifname}"
         )
 
-    def del_route(self, network_addr: str, dev: str):
+    def del_route(self, network_addr: str, dev: str) -> None:
         """
         Delete a route from the VRF routing table.
 
@@ -146,7 +147,7 @@ class VRFTable:
             f"Route {network_addr} deleted from VRF interface {self.ifname}"
         )
 
-    def replace_encap_route(self, network_addr: str, encap_dst: str, dev: str):
+    def replace_encap_route(self, network_addr: str, encap_dst: str, dev: str) -> None:
         """
         Replace an IPv6 encapsulated route in the VRF routing table.
         """
@@ -156,7 +157,7 @@ class VRFTable:
             f"Encap route {network_addr} replaced on VRF interface {self.ifname}"
         )
 
-    def sync_encap_routes(self, expected_encap_routes: dict[str, str], dev: str):
+    def sync_encap_routes(self, expected_encap_routes: dict[str, str], dev: str) -> None:
         old_keys, new_keys = self._encap_route_cache.keys(), expected_encap_routes.keys()
         for net in old_keys - new_keys:
             self.del_route(net, dev)

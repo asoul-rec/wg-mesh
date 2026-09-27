@@ -1,16 +1,15 @@
 import collections
 import json
 import logging
-import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from itertools import pairwise
-from typing import Optional
 
+from .linux_net.seg6 import SRv6CSID
 from .linux_net.wg import generate_wg_keys
 from .utils.algorithm import LinkCostSummary
-from .linux_net.seg6 import SRv6CSID
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,7 +23,7 @@ class Node:
     route_cost: dict[str, int] = field(default_factory=dict, repr=False)
     external_ips: list[str] = field(default_factory=list, repr=False)
     protected: bool = field(default=False, kw_only=True)
-    _protected_fields = {"node_id", "name", "pubkey", "endpoint", "external_ips", "protected", "_initialized"}
+    _protected_fields = frozenset(["node_id", "name", "pubkey", "endpoint", "external_ips", "protected", "_initialized"])
     _initialized = False
 
     def __post_init__(self):
@@ -33,7 +32,7 @@ class Node:
 
     def record_traffic_stat(self, item: tuple[float, int]):
         self._traffic_stats.append(item)
-        logging.debug(f"Stats for node {self.node_id}: {list(self._traffic_stats)[-10:]}")
+        logger.debug(f"Stats for node {self.node_id}: {list(self._traffic_stats)[-10:]}")
 
     def get_link_cost(self, curr_time: float) -> int:
         cost = LinkCostSummary.exponential_decay_integral(self._traffic_stats, curr_time)
@@ -77,8 +76,8 @@ class LocalNode:
     network: str
     gre_network: str = ""
     vxlan_network: str = ""
-    external_routes: dict[str, Optional[dict[str, str]]] = field(default_factory=dict)
-    csid: Optional[SRv6CSID] = None
+    external_routes: dict[str, dict[str, str] | None] = field(default_factory=dict)
+    csid: SRv6CSID | None = None
     metrics_endpoint: str = ""
     _initialized = False
 
@@ -119,8 +118,8 @@ def load_conf(config_file):
         with open(config_file, 'r') as f:
             data = json.load(f)
     except Exception as e:
-        logging.error(f"Failed to load {config_file}: {e!r}")
-        raise RuntimeError("Valid configuration file is required.")
+        logger.error(f"Failed to load {config_file}: {e!r}")
+        raise RuntimeError("Valid configuration file is required.") from e
 
     me_cfg = data.get("me", {})
     my_id = me_cfg.get("id")
@@ -136,7 +135,7 @@ def load_conf(config_file):
     my_pubkey = me_cfg.get("public_key", "")
 
     if not private_key or not my_pubkey:
-        logging.info("Missing keys in config, generating new ones...")
+        logger.info("Missing keys in config, generating new ones...")
         private_key, my_pubkey = generate_wg_keys()
         if not private_key or not my_pubkey:
             raise ValueError("Failed to generate keys")
@@ -215,5 +214,5 @@ def save_conf(config_file, me, known_nodes):
         }
         with open(config_file, 'w') as f:
             json.dump(data, f, indent=4)
-    except Exception as e:
-        logging.error(f"Save conf error: {e!r}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Save conf error: {e!r}")

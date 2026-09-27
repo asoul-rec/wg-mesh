@@ -1,12 +1,12 @@
 import heapq
 import math
+from collections.abc import Iterable
 from itertools import pairwise
 
-
 __all__ = [
-    "wrapping_sub",
-    "compute_shortest_paths",
     "LinkCostSummary",
+    "compute_shortest_paths",
+    "wrapping_sub",
 ]
 
 
@@ -61,10 +61,10 @@ def compute_shortest_paths(link_state, me_id, no_route_val=3000):
 class LinkCostSummary:
     @staticmethod
     def exponential_decay_integral(
-        stats: list[tuple[float, int]], curr_time: float, *,
+        stats: Iterable[tuple[float, int]], curr_time: float, *,
         lost_penalty: int = 6000,
         half_life: int = 20,
-        weight_cap: float = 0.2
+        weight_cap: float = 0.2,
     ) -> int:
         """
         Compute a weighted-average RTT cost for this peer link using exponential time decay.
@@ -83,11 +83,11 @@ class LinkCostSummary:
         :param curr_time: The current monotonic time (``loop.time()``).
         :return: The weighted link cost in milliseconds, minimum 1.
         """
-        if not stats:
+        sorted_stats = sorted(stats, reverse=True)
+        if not sorted_stats:
             return lost_penalty
         decay = -math.log(2) / half_life
         cost = 0
-        sorted_stats = sorted(stats, reverse=True)
         weight_left = 1
         for (t_i, rtt_i), (t_prev, _) in pairwise(sorted_stats):
             rtt_i = rtt_i if rtt_i > 0 else lost_penalty

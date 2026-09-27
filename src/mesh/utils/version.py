@@ -1,6 +1,6 @@
 __all__ = [
-    "version_to_int",
     "int_to_version",
+    "version_to_int",
 ]
 
 

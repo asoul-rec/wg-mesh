@@ -18,31 +18,22 @@ Usage from the controller::
     await server.stop()    # graceful shutdown
 """
 
-from abc import ABC, abstractmethod
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
-
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Final, Protocol, Self
 
 if TYPE_CHECKING:
     from .mesh import MeshController
 
 logger = logging.getLogger(__name__)
 
-pkt_type_names: dict[int, str] = {1: "announce", 2: "ack", 3: "route_cost"}
+PKT_TYPE_NAMES: Final = {1: "announce", 2: "ack", 3: "route_cost"}
 
 
 class CounterProtocol(Protocol):
     def labels(self, *args: Any, **kwargs: Any) -> CounterProtocol: ...
-    def inc(self, amount=1, exemplar: dict = None) -> None: ...
-
-
-class BaseCounter:
-    def labels(self, *_, **__):
-        return self
-
-    def inc(self, *_, **__):
-        pass
+    def inc(self, amount: float = 1, exemplar: dict[str, str] | None = None) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +154,12 @@ class Server(ABC):
     async def stop(self) -> None:
         pass
 
+
 class PrometheusMetricsServer(Server):
     """Minimal async HTTP server that serves the ``/metrics`` endpoint."""
 
     def __init__(self, addr: str, port: int, controller: MeshController) -> None:
-        from prometheus_client import Counter, CollectorRegistry
+        from prometheus_client import CollectorRegistry, Counter
 
         self.addr = addr
         self.port = port
@@ -207,7 +199,7 @@ class PrometheusMetricsServer(Server):
             logger.warning(f"Failed to start metrics server on {self.addr}:{self.port}: {e!r}")
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         try:
             request_line = await reader.readline()
@@ -229,7 +221,7 @@ class PrometheusMetricsServer(Server):
             else:
                 writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             await writer.drain()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to handle metrics request: {e!r}")
         finally:
             writer.close()
@@ -241,40 +233,48 @@ class PrometheusMetricsServer(Server):
             await self.server.wait_closed()
 
 
-# ---------------------------------------------------------------------------
-#  No-op stub — same interface as MetricsServer but does nothing
-# ---------------------------------------------------------------------------
-
-_NOOP = BaseCounter()
-
-
-class _NoOpServer(Server):
+class NoOpServer(Server):
     """Stub returned when prometheus_client is not installed."""
 
-    packets_total = _NOOP
-    packets_dropped_total = _NOOP
-    reliable_send_total = _NOOP
+    class NoOpCounter(CounterProtocol):
+        def labels(self, *_, **__) -> Self:
+            return self
 
-    async def start(self):
+        def inc(self, *_, **__) -> None:
+            pass
+
+    packets_total = packets_dropped_total = reliable_send_total = NoOpCounter()
+
+    async def start(self) -> None:
         pass
 
-    async def stop(self):
+    async def stop(self) -> None:
         pass
-
-_NOOP_SERVER = _NoOpServer()
-
-# ---------------------------------------------------------------------------
-#  Setup helper
-# ---------------------------------------------------------------------------
 
 
 def setup(controller: MeshController, addr: str, port: int) -> Server:
     """Create and return a metrics server (or a no-op stub if prometheus_client is missing)."""
     try:
-        if not addr or port == 0:
-            logger.info("Metrics endpoint disabled")
-            return _NOOP_SERVER
         return PrometheusMetricsServer(addr, port, controller)
     except ImportError:
-        logger.warning("Required to start metrics server, but Prometheus client library not installed. Metrics will be disabled.")
-        return _NOOP_SERVER
+        logger.warning(
+            "Cannot import Prometheus client library though metrics server info is provided. "
+            "Metrics will be disabled."
+        )
+        return NoOpServer()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to start metrics server: {e!r}")
+        return NoOpServer()
+
+
+def setup_from_str(controller: MeshController, addr_str: str | None = None) -> Server:
+    if not addr_str:
+        logger.info("Metrics is disabled.")
+        return NoOpServer()
+    try:
+        addr, port = addr_str.rsplit(":", 1)
+        port = int(port)
+    except ValueError as e:
+        logger.warning(f"Failed to parse metrics endpoint {addr_str!r}: {e!r}")
+        return NoOpServer()
+    return setup(controller, addr, port)

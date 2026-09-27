@@ -1,13 +1,15 @@
-import asyncio
 import copy
 import logging
 import subprocess
-from typing import Optional
+import typing
 
 from ..utils.ip import get_internal_ip
-from .seg6 import SRv6CSID
 from .proc import run, run_async
+from .seg6 import SRv6CSID
+from .vrf import VRFTable
 
+if typing.TYPE_CHECKING:
+    from ..node import Node
 
 __all__ = [
     "generate_wg_keys",
@@ -15,16 +17,18 @@ __all__ = [
     "sync_wg_peers",
 ]
 
+logger = logging.getLogger(__name__)
+
 
 def generate_wg_keys():
     """Attempt to call system 'wg' command to generate a keypair."""
     try:
-        logging.debug("Exec: $ wg genkey | wg pubkey")
+        logger.debug("Exec: $ wg genkey | wg pubkey")
         privkey = subprocess.check_output(["wg", "genkey"], text=True).strip()
         pubkey = subprocess.check_output(["wg", "pubkey"], input=privkey.encode(), text=True).strip()
         return privkey, pubkey
-    except Exception as e:
-        logging.error(f"Failed to generate keys via 'wg' command: {e!r}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to generate keys via 'wg' command: {e!r}")
         return None, None
 
 
@@ -35,14 +39,15 @@ def setup_wg_interface(iface_name: str, private_key: str, cidr: str, listen_port
         run(["wg", "set", iface_name, "private-key", "/dev/stdin", "listen-port", str(listen_port)], input=private_key.encode())
         run(["ip", "address", "replace", cidr, "dev", iface_name])
         run(["ip", "link", "set", "up", "dev", iface_name])
-        logging.info(f"Interface {iface_name} setup successful with IP {cidr}")
+        logger.info(f"Interface {iface_name} setup successful with IP {cidr}")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to setup wireguard {iface_name}. {e} stdout: {e.output.decode()} stderr: {e.stderr.decode()}")
+        logger.error(f"Failed to setup wireguard {iface_name}. {e} stdout: {e.output.decode()} stderr: {e.stderr.decode()}")
         raise
 
 _sync_wg_peers_running = False
 
-async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, network_addr: str, csid: Optional[SRv6CSID]=None, vrf=None):
+async def sync_wg_peers(iface_name: str, known_nodes_dict: dict[int, Node], my_node_id: int, network_addr: str, 
+                        csid: SRv6CSID | None = None, vrf: VRFTable | None = None):
     """Incrementally sync WireGuard peers. Only one instance may run at a time."""
     global _sync_wg_peers_running
     if _sync_wg_peers_running:
@@ -55,7 +60,8 @@ async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, netw
         try:
             _, stdout, _ = await run_async(["wg", "show", iface_name, "peers"])
             current_peers = set(stdout.decode().strip().splitlines())
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to get current peers on {iface_name}: {e!r}")
             current_peers = set()
 
         expected_peers = set()
@@ -80,27 +86,27 @@ async def sync_wg_peers(iface_name: str, known_nodes_dict, my_node_id: int, netw
             try:
                 rc, _, stderr = await run_async(cmd, timeout=2.0)
                 if rc != 0:
-                    logging.warning(f"wg set error for peer {node.node_id}: {stderr.decode().strip()}")
-            except asyncio.TimeoutError:
-                logging.error(f"wg set timed out for peer {node.node_id} (endpoint: {node.endpoint})")
-            except Exception as e:
-                logging.error(f"wg set failed for peer {node.node_id}: {e!r}")
+                    logger.warning(f"wg set error for peer {node.node_id}: {stderr.decode().strip()}")
+            except TimeoutError:
+                logger.error(f"wg set timed out for peer {node.node_id} (endpoint: {node.endpoint})")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"wg set failed for peer {node.node_id}: {e!r}")
 
         # 2. remove stale peers
         for pubkey in current_peers - expected_peers:
             try:
                 await run_async(["wg", "set", iface_name, "peer", pubkey, "remove"], timeout=2.0)
-                logging.info(f"Removed stale peer {pubkey} from {iface_name}")
-            except asyncio.TimeoutError:
-                logging.warning(f"wg remove timed out for stale peer {pubkey}")
-            except Exception as e:
-                logging.warning(f"Failed to remove stale peer {pubkey}: {e!r}")
+                logger.info(f"Removed stale peer {pubkey} from {iface_name}")
+            except TimeoutError:
+                logger.warning(f"wg remove timed out for stale peer {pubkey}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to remove stale peer {pubkey}: {e!r}")
 
         # 3. sync VRF external encapsulated routes logically bypassing wg keys
         if vrf is not None and csid is not None:
             try:
                 vrf.sync_encap_routes(expected_encap_routes, "tun6-mesh")
-            except Exception as e:
-                logging.error(f"Failed to sync external routes via VRF: {e!r}")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to sync external routes via VRF: {e!r}")
     finally:
         _sync_wg_peers_running = False
