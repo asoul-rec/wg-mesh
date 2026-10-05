@@ -13,15 +13,36 @@ class SRv6CSID:
     _nflen: int
     _locator_block: int
     _locator_block_address: str
+    extra_options: dict | None
 
     @overload
-    def __init__(self, *, nflen: int, locator_block: int, lblen: int, locator_block_address: None = None) -> None: ...
+    def __init__(
+        self, *,
+        nflen: int,
+        locator_block: int,
+        lblen: int,
+        locator_block_address: None = None,
+        extra_options: dict | None = None,
+    ) -> None: ...
 
     @overload
-    def __init__(self, *, nflen: int, locator_block: None = None, lblen: None = None, locator_block_address: str) -> None: ...
+    def __init__(
+        self, *,
+        nflen: int,
+        locator_block: None = None,
+        lblen: None = None,
+        locator_block_address: str,
+        extra_options: dict | None = None,
+    ) -> None: ...
 
-    def __init__(self, *, nflen: int, locator_block: int | None = None, lblen: int | None = None,
-                 locator_block_address: str | None = None) -> None:
+    def __init__(
+        self, *,
+        nflen: int,
+        locator_block: int | None = None,
+        lblen: int | None = None,
+        locator_block_address: str | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
         """
         Initialize the SRv6 CSID geometry. Accepts either a combination of ``locator_block`` and ``lblen``,
         or a CIDR-style ``locator_block_address``.
@@ -51,6 +72,7 @@ class SRv6CSID:
         self._nflen = nflen
         self._locator_block = locator_block
         self._locator_block_address = str(ipaddress.IPv6Network((locator_block << (128 - lblen), lblen)))
+        self.extra_options = extra_options
 
     @property
     def locator_block_address(self) -> str:
@@ -64,7 +86,9 @@ class SRv6CSID:
     def nflen(self) -> int:
         return self._nflen
 
-    def get_node_function_address(self, node_function_id: int, *, cidr: Literal["network", "host"] | None = None) -> str:
+    def get_node_function_address(
+        self, node_function_id: int, *, cidr: Literal["network", "host"] | None = None
+    ) -> str:
         """
         Construct a CSID-assigned IPv6 address for a specific Node Function ID.
 
@@ -75,7 +99,9 @@ class SRv6CSID:
         """
         node_function_id = int(node_function_id)
         if not 0 < node_function_id < 1 << self._nflen:
-            raise ValueError(f"Node function ID {node_function_id} is invalid for Locator-Node Function length {self._nflen}.")
+            raise ValueError(
+                f"Node function ID {node_function_id} is invalid for Locator-Node Function length {self._nflen}."
+            )
         net_int = self._locator_block << self._nflen | node_function_id
         net_int <<= 128 - self._lblen - self._nflen
         net = ipaddress.IPv6Network((net_int, self._lblen + self._nflen))
@@ -110,8 +136,8 @@ class SRv6CSID:
         addr_int <<= padding
         return str(ipaddress.IPv6Address(addr_int))
 
-    def to_dict(self, locator_block: Literal["address", "block"] = "address") -> dict[str, int | str]:
-        d: dict[str, int | str]
+    def to_dict(self, locator_block: Literal["address", "block"] = "address") -> dict[str, int | str | dict]:
+        d: dict[str, int | str | dict]
         match locator_block:
             case "address":
                 d = {"locator_block_address": self._locator_block_address}
@@ -120,4 +146,6 @@ class SRv6CSID:
             case _:
                 raise ValueError(f"Unknown locator_block type: {locator_block!r}")
         d["nflen"] = self._nflen
+        if self.extra_options:
+            d["extra_options"] = self.extra_options
         return d

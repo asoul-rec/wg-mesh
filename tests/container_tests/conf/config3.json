@@ -8,7 +8,10 @@
         "srv6": {
             "flavor": "next-csid",
             "locator_block_address": "fd00::/8",
-            "nflen": 8
+            "nflen": 8,
+            "extra_options": {
+                "enable_sticky_ipv4_flow": true
+            }
         },
         "external_routes": {
             "172.20.124.4/32": {

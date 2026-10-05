@@ -2,6 +2,7 @@ import asyncio
 import logging
 import shlex
 import subprocess
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__.rsplit(".", 1)[0])
 
@@ -36,12 +37,13 @@ async def run_async(cmd, timeout=None):
             except OSError:
                 pass
 
-def log_called_process_error(logger, e):
+
+def log_called_process_error(logger: Callable[[str], None], e: subprocess.CalledProcessError):
     msg = [str(e)]
     try:
-        if (out := e.stdout.decode().strip()):
+        if out := e.stdout.decode().strip():
             msg.append(f"stdout: {out!r}")
-        if (err := e.stderr.decode().strip()):
+        if err := e.stderr.decode().strip():
             msg.append(f"stderr: {err!r}")
     except Exception as e1:  # noqa: BLE001
         msg.append(f"[Failed to get streams: {e1!r}]")

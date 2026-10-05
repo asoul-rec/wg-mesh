@@ -4,6 +4,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Final
 
 from .linux_net.seg6 import SRv6CSID
 from .linux_net.wg import generate_wg_keys
@@ -23,8 +24,8 @@ class Node:
     route_cost: dict[str, int] = field(default_factory=dict, repr=False)
     external_ips: list[str] = field(default_factory=list, repr=False)
     protected: bool = field(default=False, kw_only=True)
-    _protected_fields = frozenset(["node_id", "name", "pubkey", "endpoint", "external_ips", "protected", "_initialized"])
-    _initialized = False
+    _protected_fields: Final = frozenset(["node_id", "name", "pubkey", "endpoint", "external_ips", "protected", "_initialized"])
+    _initialized: bool = False
 
     def __post_init__(self):
         self._traffic_stats = collections.deque(maxlen=100)
@@ -122,17 +123,17 @@ def load_conf(config_file):
         raise RuntimeError("Valid configuration file is required.") from e
 
     me_cfg = data.get("me", {})
-    my_id = me_cfg.get("id")
+    my_id = me_cfg.pop("id")
     if not my_id:
         raise ValueError("Config must contain 'me.id'")
 
-    network_str = me_cfg.get("network", me_cfg.get("cidr", "10.123.234.0/24"))
-    gre_network_str = me_cfg.get("gre_network", "")
-    vxlan_network_str = me_cfg.get("vxlan_network", "")
-    srv6_settings = me_cfg.get("srv6")
-    metrics_endpoint = me_cfg.get("metrics_endpoint", "")
-    private_key = me_cfg.get("private_key", "")
-    my_pubkey = me_cfg.get("public_key", "")
+    network_str = me_cfg.pop("network", me_cfg.pop("cidr", "10.123.234.0/24"))
+    gre_network_str = me_cfg.pop("gre_network", "")
+    vxlan_network_str = me_cfg.pop("vxlan_network", "")
+    srv6_settings = me_cfg.pop("srv6", None)
+    metrics_endpoint = me_cfg.pop("metrics_endpoint", "")
+    private_key = me_cfg.pop("private_key", "")
+    my_pubkey = me_cfg.pop("public_key", "")
 
     if not private_key or not my_pubkey:
         logger.info("Missing keys in config, generating new ones...")
@@ -142,7 +143,6 @@ def load_conf(config_file):
 
     csid = None
     if srv6_settings is not None:
-        srv6_settings = srv6_settings.copy()
         flavor = srv6_settings.pop("flavor", "")
         if flavor == "next-csid":
             csid = SRv6CSID(**srv6_settings)
@@ -150,12 +150,12 @@ def load_conf(config_file):
             raise ValueError(f"Unknown SRv6 flavor: {flavor}")
 
     node_me = Node(
-        my_id, me_cfg.get("name", f"node-{my_id}"),
+        my_id, me_cfg.pop("name", f"node-{my_id}"),
         pubkey=my_pubkey,
-        endpoint=me_cfg.get("endpoint", ""),
-        seq_num=me_cfg.get("seq_num", 0),
-        timestamp=me_cfg.get("timestamp", int(time.time())),
-        route_cost=me_cfg.get("route_cost", {}),
+        endpoint=me_cfg.pop("endpoint", ""),
+        seq_num=me_cfg.pop("seq_num", 0),
+        timestamp=me_cfg.pop("timestamp", int(time.time())),
+        route_cost=me_cfg.pop("route_cost", {}),
         # external_ips will be updated in LocalNode.__post_init__
         protected=True
     )
@@ -165,7 +165,7 @@ def load_conf(config_file):
         network=network_str,
         gre_network=gre_network_str,
         vxlan_network=vxlan_network_str,
-        external_routes=me_cfg.get("external_routes", {}),
+        external_routes=me_cfg.pop("external_routes", {}),
         csid=csid,
         metrics_endpoint=metrics_endpoint
     )
