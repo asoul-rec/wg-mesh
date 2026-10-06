@@ -2,9 +2,10 @@ import copy
 import logging
 import subprocess
 import typing
+from typing import Literal
 
 from ..utils.ip import get_internal_ip
-from .proc import run, run_async
+from .proc import log_called_process_error, run, run_async
 from .seg6 import SRv6CSID
 from .vrf import VRFTable
 
@@ -32,22 +33,43 @@ def generate_wg_keys():
         return None, None
 
 
-def setup_wg_interface(iface_name: str, private_key: str, cidr: str, listen_port: int = 51820):
+def setup_wg_interface(
+    iface_name: str, private_key: str, cidr: str, listen_port: int = 51820, provider: Literal["kernel", "go"] = "kernel"
+):
     """init wg interface, equivalent to wg-quick up"""
     try:
-        run(["ip", "link", "add", "dev", iface_name, "type", "wireguard"], check=False)
-        run(["wg", "set", iface_name, "private-key", "/dev/stdin", "listen-port", str(listen_port)], input=private_key.encode())
+        run(["ip", "link", "del", iface_name], check=False)
+        match provider:
+            case "kernel":
+                run(["ip", "link", "add", iface_name, "type", "wireguard"])
+            case "go":
+                run(["wireguard-go", iface_name])
+            case _:
+                raise ValueError(f"Unknown provider: {provider}")
+        run(
+            ["wg", "set", iface_name, "private-key", "/dev/stdin", "listen-port", str(listen_port)],
+            input=private_key.encode(),
+        )
         run(["ip", "address", "replace", cidr, "dev", iface_name])
         run(["ip", "link", "set", "up", "dev", iface_name])
         logger.info(f"Interface {iface_name} setup successful with IP {cidr}")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to setup wireguard {iface_name}. {e} stdout: {e.output.decode()} stderr: {e.stderr.decode()}")
+        log_called_process_error(logger.error, e)
+        raise
+    except Exception as e:
+        logger.error(f"Failed to setup wireguard interface {iface_name}: {e!r}")
         raise
 
 _sync_wg_peers_running = False
 
-async def sync_wg_peers(iface_name: str, known_nodes_dict: dict[int, Node], my_node_id: int, network_addr: str, 
-                        csid: SRv6CSID | None = None, vrf: VRFTable | None = None):
+async def sync_wg_peers(
+    iface_name: str,
+    known_nodes_dict: dict[int, Node],
+    my_node_id: int,
+    network_addr: str,
+    csid: SRv6CSID | None = None,
+    vrf: VRFTable | None = None,
+):
     """Incrementally sync WireGuard peers. Only one instance may run at a time."""
     global _sync_wg_peers_running
     if _sync_wg_peers_running:

@@ -4,7 +4,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Literal
 
 from .linux_net.seg6 import SRv6CSID
 from .linux_net.wg import generate_wg_keys
@@ -73,6 +73,7 @@ class Node:
 @dataclass(kw_only=True)
 class LocalNode:
     node: Node
+    wireguard_provider: Literal["kernel", "go"] | None = None
     private_key: str = field(repr=False)
     network: str
     gre_network: str = ""
@@ -98,6 +99,8 @@ class LocalNode:
 
     def to_dict(self):
         d = self.node.to_dict()
+        if self.wireguard_provider is not None:
+            d["wireguard_provider"] = self.wireguard_provider
         d["private_key"] = self.private_key
         d["network"] = self.network
         if self.gre_network:
@@ -132,6 +135,10 @@ def load_conf(config_file):
     vxlan_network_str = me_cfg.pop("vxlan_network", "")
     srv6_settings = me_cfg.pop("srv6", None)
     metrics_endpoint = me_cfg.pop("metrics_endpoint", "")
+    wireguard_provider = me_cfg.pop("wireguard_provider", None)
+    if wireguard_provider not in ["kernel", "go", None]:
+        logger.warning(f"Invalid wireguard provider: {wireguard_provider}, falling back to default.")
+        wireguard_provider = None
     private_key = me_cfg.pop("private_key", "")
     my_pubkey = me_cfg.pop("public_key", "")
 
@@ -161,6 +168,7 @@ def load_conf(config_file):
     )
     me = LocalNode(
         node=node_me,
+        wireguard_provider=wireguard_provider,
         private_key=private_key,
         network=network_str,
         gre_network=gre_network_str,
@@ -201,8 +209,8 @@ def save_conf(config_file, me, known_nodes):
         me_dict["public_key"] = me_dict.pop("pubkey")
         # reorder keys
         for key in [
-            "id", "name", "private_key", "public_key", "endpoint", "network",
-            "srv6", "gre_network", "vxlan_network", "external_routes", "metrics_endpoint",
+            "id", "name", "private_key", "public_key", "endpoint", "wireguard_provider",
+            "network", "srv6", "gre_network", "vxlan_network", "external_routes", "metrics_endpoint",
             "route_cost", "seq_num", "timestamp"
         ]:
             if key in me_dict:

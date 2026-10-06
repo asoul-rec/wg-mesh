@@ -219,7 +219,10 @@ class MeshController:
             self.vrf.up()
             for ext_ip, options in self.me.external_routes.items():
                 self.vrf.add_route(ext_ip, options)
-            setup_wg_interface("wg0", self.me.private_key, my_cidr)
+            if self.me.wireguard_provider is None:
+                setup_wg_interface("wg0", self.me.private_key, my_cidr)
+            else:
+                setup_wg_interface("wg0", self.me.private_key, my_cidr, provider=self.me.wireguard_provider)
             self.trigger_wg_update()
             if self.me.csid is not None:
                 self.seg6_controller = Seg6Controller(self.me.csid)

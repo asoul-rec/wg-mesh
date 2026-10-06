@@ -21,6 +21,7 @@
         "gre_network": "10.124.234.0/24",
         "vxlan_network": "10.125.234.0/24",
         "seq_num": 1,
+        "wireguard_provider": "go",
         "private_key": "AOQ5yUTeHxshA49Hqo+EaI21lItgKEGvyXP7GLxFCl4=",
         "public_key": "KDrEX85VNrZhEeKdeRH6kh9BbzosLprrgYHfwNtt+gk=",
         "endpoint": "172.20.0.0:50000"
